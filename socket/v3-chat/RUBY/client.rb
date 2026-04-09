@@ -1,18 +1,29 @@
 require 'socket'
+require 'thread'
 
-HOST = 'localhost'
+HOST = '127.0.0.1'
 PORT = 9092
+
+puts "Digite seu nome de usuario:"
+username = STDIN.gets&.strip
+
+if username.nil? || username.empty?
+  puts "Nome vazio. Encerrando."
+  exit
+end
 
 puts "Conectando ao servidor em #{HOST}:#{PORT}..."
 
 begin
   socket = TCPSocket.new(HOST, PORT)
 rescue Errno::ECONNREFUSED
-  puts "Erro: Conexão recusada."
+  puts "Erro: Conexao recusada."
   exit
 end
 
-# Thread para ler do servidor assincronamente
+socket.sync = true
+socket.write("#{username}\n")
+
 receiver = Thread.new do
   begin
     loop do
@@ -21,20 +32,24 @@ receiver = Thread.new do
       print line
     end
   rescue
-    # Evita crash ao fechar o socket abruptamente
   end
 end
 
-puts "Digite mensagens. Ctrl+C para sair."
+puts "Digite mensagens. Use /quit para sair."
 
 begin
   while (line = STDIN.gets)
     socket.write(line)
+    break if line.strip == "/quit"
   end
 rescue Interrupt
   puts "\nSaindo..."
 ensure
+  begin
+    socket.shutdown(Socket::SHUT_RDWR)
+  rescue
+  end
   socket.close rescue nil
   receiver.join rescue nil
-  puts "Conexão encerrada."
+  puts "Conexao encerrada."
 end

@@ -10,8 +10,17 @@
 #define HOST "127.0.0.1"
 #define PORT 9090
 #define BUFFER_SIZE 512
+#define MAX_NAME 64
 
 static SOCKET g_sock = INVALID_SOCKET;
+
+static void trim_crlf(char *s) {
+    size_t len = strlen(s);
+    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r')) {
+        s[len - 1] = '\0';
+        len--;
+    }
+}
 
 unsigned __stdcall receiver_thread(void *arg) {
     SOCKET sock = *(SOCKET *)arg;
@@ -38,9 +47,23 @@ int main(void) {
     unsigned thread_id;
     HANDLE thread_handle;
     char line[BUFFER_SIZE];
+    char username[MAX_NAME];
 
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         fprintf(stderr, "WSAStartup falhou.\n");
+        return 1;
+    }
+
+    printf("Digite seu nome de usuario: ");
+    if (fgets(username, sizeof(username), stdin) == NULL) {
+        WSACleanup();
+        return 1;
+    }
+    trim_crlf(username);
+
+    if (username[0] == '\0') {
+        printf("Nome vazio. Encerrando.\n");
+        WSACleanup();
         return 1;
     }
 
@@ -67,18 +90,28 @@ int main(void) {
 
     g_sock = sock;
 
+    {
+        char hello[MAX_NAME + 2];
+        snprintf(hello, sizeof(hello), "%s\n", username);
+        send(sock, hello, (int)strlen(hello), 0);
+    }
+
     thread_handle = (HANDLE)_beginthreadex(NULL, 0, receiver_thread, &g_sock, 0, &thread_id);
     if (thread_handle == NULL) {
-        fprintf(stderr, "Erro ao criar thread de recepção.\n");
+        fprintf(stderr, "Erro ao criar thread de recepcao.\n");
         closesocket(sock);
         WSACleanup();
         return 1;
     }
 
-    printf("Digite mensagens. Ctrl+C para sair.\n");
+    printf("Digite mensagens. Use /quit para sair.\n");
 
     while (fgets(line, sizeof(line), stdin)) {
         send(sock, line, (int)strlen(line), 0);
+
+        if (strcmp(line, "/quit\n") == 0 || strcmp(line, "/quit\r\n") == 0) {
+            break;
+        }
     }
 
     shutdown(sock, SD_BOTH);
@@ -88,6 +121,6 @@ int main(void) {
     CloseHandle(thread_handle);
 
     WSACleanup();
-    printf("Conexão encerrada.\n");
+    printf("Conexao encerrada.\n");
     return 0;
 }
