@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CalcDist Clássica</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="calculator">
+        <div class="display" id="display">0</div>
+
+        <div class="keypad">
+            <button class="btn-action" onclick="setOp('pow')">X^y</button>
+            <button class="btn-action" onclick="setOp('mod')">Mod</button>
+            <button class="btn-action" onclick="calcSqrt()">√</button>
+            <button class="btn-clear" onclick="clearDisplay()">C</button>
+
+            <button class="btn-num" onclick="addNum('7')">7</button>
+            <button class="btn-num" onclick="addNum('8')">8</button>
+            <button class="btn-num" onclick="addNum('9')">9</button>
+            <button class="btn-op" onclick="setOp('div')">÷</button>
+
+            <button class="btn-num" onclick="addNum('4')">4</button>
+            <button class="btn-num" onclick="addNum('5')">5</button>
+            <button class="btn-num" onclick="addNum('6')">6</button>
+            <button class="btn-op" onclick="setOp('mul')">×</button>
+
+            <button class="btn-num" onclick="addNum('1')">1</button>
+            <button class="btn-num" onclick="addNum('2')">2</button>
+            <button class="btn-num" onclick="addNum('3')">3</button>
+            <button class="btn-op" onclick="setOp('sub')">-</button>
+
+            <button class="btn-num" onclick="addNum('.')">.</button>
+            <button class="btn-num" onclick="addNum('0')">0</button>
+            <button class="btn-eq" onclick="calculate()">=</button>
+            <button class="btn-op" onclick="setOp('add')">+</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
