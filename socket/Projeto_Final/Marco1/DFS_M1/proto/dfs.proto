@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package dfs.v1;
+
+// Mensagem enviada do cliente para o servidor.
+message FileRequest {
+  string op = 1;     // Operação desejada: PUT, GET, LIST, DELETE
+  string path = 2;   // Caminho lógico do arquivo no DFS
+  bytes data = 3;    // Conteúdo binário do arquivo, quando aplicável
+}
+
+// Mensagem enviada do servidor para o cliente.
+message FileResponse {
+  bool ok = 1;                  // Indica se a operação deu certo
+  string message = 2;           // Mensagem textual de retorno
+  bytes data = 3;               // Conteúdo retornado em GET
+  repeated string entries = 4;  // Lista de arquivos retornada em LIST
+}
