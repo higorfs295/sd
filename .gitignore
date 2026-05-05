@@ -1,13 +1,27 @@
+# PDFs apenas na raiz
 /*.pdf
 
-# ambiente virtual
+# =========================
+# Ambiente virtual (qualquer nível)
+# =========================
 .venv/
 venv/
+**/.venv/
+**/venv/
 
-# python cache
+# =========================
+# Python cache (qualquer nível)
+# =========================
 __pycache__/
+**/__pycache__/
 *.pyc
+*.pyo
 
-# arquivos locais
+# =========================
+# Arquivos locais
+# =========================
 *.log
+
+# dados distribuídos (todos os níveis)
 data/
+**/data/
