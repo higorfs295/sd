@@ -1,0 +1,45 @@
+# main.py
+from referencia_remota import ModuloReferenciaRemota
+
+def exibir_menu():
+    print("\n" + "=" * 40)
+    print("  Calculadora Distribuída (Arquitetura RMI)")
+    print("=" * 40)
+    print(" [+] Soma      [-] Subtração")
+    print(" [*] Multiplicação [/] Divisão")
+    print(" [^] Potência      [%] Módulo")
+    print(" [r] Raiz Quadrada")
+    print(" Digite 'sair' para encerrar.")
+    print("-" * 40)
+
+def main():
+    try:
+        # Aciona o módulo de referência para localizar e criar o Proxy
+        referencia_module = ModuloReferenciaRemota()
+        proxy_calculadora = referencia_module.obter_proxy()
+    except ConnectionError as e:
+        print(e)
+        return
+
+    exibir_menu()
+
+    while True:
+        op = input("\nOperação: ").strip().lower()
+        if op == 'sair':
+            break
+        if op not in ['+', '-', '*', '/', '^', '%', 'r']:
+            print("Operação inválida.")
+            continue
+
+        a = input("Número 1: ")
+        b = "0" if op == 'r' else input("Número 2: ")
+
+        try:
+            # O proxy faz a chamada simulando a presença local
+            resultado = proxy_calculadora.calcular(a, b, op)
+            print(f">>> Resultado: {resultado}")
+        except Exception as e:
+            print(f"Erro na comunicação RMI: {e}")
+
+if __name__ == "__main__":
+    main()
