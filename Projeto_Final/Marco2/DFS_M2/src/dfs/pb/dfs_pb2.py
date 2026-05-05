@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tdfs.proto\x12\x06\x64\x66s.v1\"5\n\x0b\x46ileRequest\x12\n\n\x02op\x18\x01 \x01(\t\x12\x0c\n\x04path\x18\x02 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\"J\n\x0c\x46ileResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x0f\n\x07\x65ntries\x18\x04 \x03(\tb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tdfs.proto\x12\x06\x64\x66s.v1\"X\n\x0b\x46ileRequest\x12\n\n\x02op\x18\x01 \x01(\t\x12\x0c\n\x04path\x18\x02 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x0f\n\x07node_id\x18\x04 \x01(\t\x12\x10\n\x08shard_id\x18\x05 \x01(\x05\"m\n\x0c\x46ileResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x0f\n\x07\x65ntries\x18\x04 \x03(\t\x12\x0f\n\x07node_id\x18\x05 \x01(\t\x12\x10\n\x08shard_id\x18\x06 \x01(\x05\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,7 +32,7 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'dfs_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_FILEREQUEST']._serialized_start=21
-  _globals['_FILEREQUEST']._serialized_end=74
-  _globals['_FILERESPONSE']._serialized_start=76
-  _globals['_FILERESPONSE']._serialized_end=150
+  _globals['_FILEREQUEST']._serialized_end=109
+  _globals['_FILERESPONSE']._serialized_start=111
+  _globals['_FILERESPONSE']._serialized_end=220
 # @@protoc_insertion_point(module_scope)

@@ -1,1 +1,13 @@
 /*.pdf
+
+# ambiente virtual
+.venv/
+venv/
+
+# python cache
+__pycache__/
+*.pyc
+
+# arquivos locais
+*.log
+data/
