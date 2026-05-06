@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dfs"
+version = "0.1.0"
+description = "Distributed File System"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+packages = ["dfs", "dfs.interface", "dfs.pb"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-dir]
+"" = "src"
