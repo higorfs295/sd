@@ -46,12 +46,12 @@ class FileService:
         self.timeout = timeout
 
     # Enviar uma requisição para o nó responsável
-    def _send_to_node(self, node, request_op: str, path: str, data: bytes = b"", shard_id: int = 0):
+    def _send_to_node(self, node, op: str, path: str, data: bytes = b"", shard_id: int = 0):
         """
         Encaminha a operação para o nó responsável
         """
         # Calcula o shard associado ao caminho
-        shard_id = self.sharding.shard_id_for_path(path)
+        shard_id = self.sharding.base_shard_for_path(path)
 
         # Cria cliente interno para falar com o nó.
         client = NodeClient(node.host, node.port, timeout=self.timeout)
