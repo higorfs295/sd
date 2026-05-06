@@ -58,7 +58,7 @@ class FileService:
 
         # Monta a requisição Protobuf que será enviada ao nó
         raw_request = make_request(
-            op=request_op,
+            op=op,
             path=path, # caminho físico do chunk dentro do storage node
             data=data, # bytes (apenas para PUT, vazio para GET e DELETE)
             node_id=node.node_id,
