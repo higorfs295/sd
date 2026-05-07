@@ -1,8 +1,7 @@
 """
 DESCRIÇÃO GERAL:
-Este módulo concentra as configurações do DFS distribuído.
-A ideia é centralizar portas, nós e caminhos de armazenamento para evitar valores
-espalhados pelo código, o que facilita a manutenção e a evolução do projeto.
+Este módulo concentra as configurações do DFS distribuído
+A ideia é centralizar portas, nós e caminhos de armazenamento para evitar valores espalhados pelo código, o que facilita a manutenção e a evolução do projeto
 """
 
 from pathlib import Path
@@ -36,34 +35,51 @@ METADATA_DIR = DATA_DIR / "metadata"
 # Define o arquivo JSON que guardará o índice persistente de metadados
 METADATA_FILE = METADATA_DIR / "metadata_index.json"
 
-# Configuração estática dos nós do cluster
-# Cada nó possui um identificador, um host, uma porta e um diretório próprio.
-NODES = {
-    "node1": {
-        "host": "127.0.0.1",
-        "port": 9101,
-        "storage_dir": DATA_DIR / "nodes" / "node1",
-    },
-    "node2": {
-        "host": "127.0.0.1",
-        "port": 9102,
-        "storage_dir": DATA_DIR / "nodes" / "node2",
-    },
-    "node3": {
-        "host": "127.0.0.1",
-        "port": 9103,
-        "storage_dir": DATA_DIR / "nodes" / "node3",
-    },
-}
+# Mantido por compatibilidade com o Marco 1
+# Pode servir como raiz padrão em testes simples ou execuções isoladas
+STORAGE_DIR = DATA_DIR / "storage"
+
+# Quantidade de nós do cluster
+# Para mudar, edite o valor abaixo e reinicie o cluster (run_cluster.py)
+# As portas e os diretórios são alocados automaticamente a partir dos valores BASE_NODE_PORT e DATA_DIR.
+# IMPORTANTE: ao mudar este valor com dados já gravados em disco, os arquivos antigos podem ficar inacessíveis (porque o hash do sharding redistribui as posições)
+# Recomenda-se apagar a pasta 'data/' antes de mudar o número de nós
+NODE_COUNT = 3
+
+# Porta do primeiro nó
+# A regra de alocação é: node1 -> 9101, node2 -> 9102, node3 -> 9103, ...
+BASE_NODE_PORT = 9101
+
+
+def build_nodes(count: int, base_port: int = BASE_NODE_PORT) -> dict[str, dict]:
+    """
+    Gera dinamicamente a configuração dos nós do cluster
+
+    Cada nó recebe:
+    - identificador sequencial no formato "nodeN" (node1, node2, ...);
+    - porta calculada a partir de base_port (uma porta a mais por nó);
+    - diretório próprio dentro de DATA_DIR/nodes/
+
+    Mudar a quantidade de nós significa apenas alterar a constante NODE_COUNT acima
+    O restante do sistema (run_cluster.py, sharding, registry) lê NODES e NODE_ORDER e se adapta automaticamente
+    """
+    return {
+        f"node{i}": {
+            "host": "127.0.0.1",
+            "port": base_port + i - 1,
+            "storage_dir": DATA_DIR / "nodes" / f"node{i}",
+        }
+        for i in range(1, count + 1)
+    }
+
+
+# Configuração final dos nós, gerada a partir de NODE_COUNT
+NODES = build_nodes(NODE_COUNT)
 
 # Ordem fixa dos nós
 # Essa ordem é importante para garantir que o shard calculado sempre aponte para o mesmo nó
 NODE_ORDER = tuple(NODES.keys())
 
 # Quantidade total de shards
-# No Marco 2, o mais simples é ter um shard por nó.
+# No Marco 2, o mais simples é ter um shard por nó
 TOTAL_SHARDS = len(NODE_ORDER)
-
-# Mantido por compatibilidade com o Marco 1
-# Pode servir como raiz padrão em testes simples ou execuções isoladas
-STORAGE_DIR = DATA_DIR / "storage"

@@ -5,7 +5,7 @@ Ela recebe requisições já direcionadas pelo coordenador e executa as operaç�
 localmente sobre o storage do nó.
 """
 
-from dfs.protocol import parse_request, make_response
+from dfs.pb.protocol import parse_request, make_response
 from dfs.storage.local_storage import LocalStorage
 
 

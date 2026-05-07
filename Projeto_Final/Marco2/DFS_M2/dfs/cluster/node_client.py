@@ -7,7 +7,7 @@ com cada nó do cluster. Ele reutiliza o framing e o protocolo já definidos no 
 import socket
 
 from dfs.frame import send_frame, recv_frame
-from dfs.protocol import parse_response
+from dfs.pb.protocol import parse_response
 
 
 class NodeClient:
@@ -25,7 +25,9 @@ class NodeClient:
         Envia uma requisição já serializada e recebe a resposta.
         """
         # Cria conexão com timeout para evitar travamento indefinido.
-        with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
+        with socket.create_connection(
+            (self.host, self.port), timeout=self.timeout
+        ) as sock:
             # Envia a mensagem já em bytes.
             send_frame(sock, raw_request)
 

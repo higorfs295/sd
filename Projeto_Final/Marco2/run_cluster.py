@@ -4,10 +4,17 @@ import os
 import subprocess
 import sys
 import time
+import importlib
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
 DFS_DIR = ROOT_DIR / "DFS_M2"
+
+# Adiciona DFS_M2/ ao sys.path para que este script consiga importar o pacote 'dfs'
+# Precisa vir ANTES do import de dfs.config
+sys.path.insert(0, str(DFS_DIR))
+
+from dfs.config import NODE_ORDER  # type: ignore[import-not-found]
 
 
 def build_env() -> dict[str, str]:
@@ -41,7 +48,7 @@ def start_process(
 
 def main() -> None:
     """
-    Sobe os três nós e o coordenador do DFS.
+    Sobe os três nós e o coordenador do DFS
     """
     if not DFS_DIR.exists():
         print(f"Erro: pasta não encontrada: {DFS_DIR}")
@@ -51,54 +58,27 @@ def main() -> None:
     processes: list[subprocess.Popen] = []
 
     try:
-        processes.append(
-            start_process(
-                "node1",
-                [
-                    sys.executable,
-                    "-m",
-                    "dfs.interface.storage_node",
-                    "--node-id",
-                    "node1",
-                ],
-                cwd=DFS_DIR,
-                env=env,
+        # Loop que cobre quantos nós existirem em config.py
+        # Se adicionar nodeX no NODES, eles sobem automaticamente, sem mexer aqui
+        for node_id in NODE_ORDER:
+            processes.append(
+                start_process(
+                    node_id,
+                    [
+                        sys.executable,
+                        "-m",
+                        "dfs.interface.storage_node",
+                        "--node-id",
+                        node_id,
+                    ],
+                    cwd=DFS_DIR,
+                    env=env,
+                )
             )
-        )
-        time.sleep(0.5)
+            # Pequena pausa entre subidas para evitar disputa pela porta
+            time.sleep(0.5)
 
-        processes.append(
-            start_process(
-                "node2",
-                [
-                    sys.executable,
-                    "-m",
-                    "dfs.interface.storage_node",
-                    "--node-id",
-                    "node2",
-                ],
-                cwd=DFS_DIR,
-                env=env,
-            )
-        )
-        time.sleep(0.5)
-
-        processes.append(
-            start_process(
-                "node3",
-                [
-                    sys.executable,
-                    "-m",
-                    "dfs.interface.storage_node",
-                    "--node-id",
-                    "node3",
-                ],
-                cwd=DFS_DIR,
-                env=env,
-            )
-        )
-        time.sleep(0.5)
-
+        # Coordenador sobe DEPOIS dos nós, assim quando ele começa a processar requisições, todos os nós já estão prontos
         processes.append(
             start_process(
                 "coordinator",

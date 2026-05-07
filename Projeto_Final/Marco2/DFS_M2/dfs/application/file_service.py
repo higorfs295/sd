@@ -8,7 +8,7 @@ from dfs.cluster.node_client import NodeClient
 from dfs.cluster.node_registry import NodeRegistry
 from dfs.cluster.sharding import ShardingManager
 from dfs.application.metadata_service import MetadataService
-from dfs.protocol import parse_request, make_request, make_response
+from dfs.pb.protocol import parse_request, make_request, make_response
 from dfs.config import CHUNK_SIZE
 
 
