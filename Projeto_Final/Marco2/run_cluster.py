@@ -6,10 +6,8 @@ import sys
 import time
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parent
 DFS_DIR = ROOT_DIR / "DFS_M2"
-SRC_DIR = DFS_DIR / "src"
 
 
 def build_env() -> dict[str, str]:
@@ -19,7 +17,7 @@ def build_env() -> dict[str, str]:
     env = os.environ.copy()
     current_pythonpath = env.get("PYTHONPATH", "")
 
-    paths = [str(SRC_DIR)]
+    paths = [str(DFS_DIR)]
     if current_pythonpath:
         paths.append(current_pythonpath)
 
@@ -27,7 +25,9 @@ def build_env() -> dict[str, str]:
     return env
 
 
-def start_process(label: str, args: list[str], cwd: Path, env: dict[str, str]) -> subprocess.Popen:
+def start_process(
+    label: str, args: list[str], cwd: Path, env: dict[str, str]
+) -> subprocess.Popen:
     """
     Inicia um processo filho e devolve o handle dele.
     """
@@ -54,7 +54,13 @@ def main() -> None:
         processes.append(
             start_process(
                 "node1",
-                [sys.executable, "-m", "dfs.interface.storage_node", "--node-id", "node1"],
+                [
+                    sys.executable,
+                    "-m",
+                    "dfs.interface.storage_node",
+                    "--node-id",
+                    "node1",
+                ],
                 cwd=DFS_DIR,
                 env=env,
             )
@@ -64,7 +70,13 @@ def main() -> None:
         processes.append(
             start_process(
                 "node2",
-                [sys.executable, "-m", "dfs.interface.storage_node", "--node-id", "node2"],
+                [
+                    sys.executable,
+                    "-m",
+                    "dfs.interface.storage_node",
+                    "--node-id",
+                    "node2",
+                ],
                 cwd=DFS_DIR,
                 env=env,
             )
@@ -74,7 +86,13 @@ def main() -> None:
         processes.append(
             start_process(
                 "node3",
-                [sys.executable, "-m", "dfs.interface.storage_node", "--node-id", "node3"],
+                [
+                    sys.executable,
+                    "-m",
+                    "dfs.interface.storage_node",
+                    "--node-id",
+                    "node3",
+                ],
                 cwd=DFS_DIR,
                 env=env,
             )

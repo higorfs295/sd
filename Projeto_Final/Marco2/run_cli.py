@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parent
-DFS_SRC_DIR = ROOT_DIR / "DFS_M2" / "src"
+DFS_DIR = ROOT_DIR / "DFS_M2"
 
-# Faz o Python enxergar o pacote dfs sem precisar entrar manualmente em DFS_M2
-sys.path.insert(0, str(DFS_SRC_DIR))
+if not DFS_DIR.exists():
+    raise FileNotFoundError(f"Pasta DFS_M2 não encontrada: {DFS_DIR}")
 
-from dfs.interface.cli import main  # noqa: E402
+sys.path.insert(0, str(DFS_DIR))
 
+cli_module = importlib.import_module("dfs.interface.cli")
+main = cli_module.main
 
 if __name__ == "__main__":
     main(sys.argv[1:])

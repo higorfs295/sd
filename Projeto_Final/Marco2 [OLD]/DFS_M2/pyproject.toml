@@ -10,4 +10,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
+
+[tool.setuptools]
+packages = ["dfs", "dfs.interface", "dfs.pb"]
+package-dir = {"" = "src"}
