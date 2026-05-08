@@ -1,122 +1,335 @@
 """
 DESCRIÇÃO GERAL:
-Este é o ponto de interação com o usuário (Interface de Linha de Comando - CLI).
-Ele interpreta o que o usuário digita no terminal (ex: "dfs put teste.txt docs/teste.txt"),
-transforma isso em variáveis, chama a camada de cliente de rede e exibe o resultado
-de forma visual na tela.
+Interface de linha de comando do DFS.
+
+Este módulo agora oferece dois modos de uso:
+1) modo direto, com comandos únicos:
+   python run_cli.py put origem.txt docs/origem.txt
+
+2) modo interativo, com menu e conexão persistente:
+   python run_cli.py
+
+No modo interativo, a mesma conexão TCP com o coordenador fica aberta
+enquanto a sessão estiver ativa.
 """
 
-# argparse é a biblioteca padrão do Python mais robusta para criar CLIs.
-# Ela gera menus de ajuda (-h) automaticamente e lida com parâmetros obrigatorios/opcionais.
 import argparse
-
-# Path para manipular os arquivos locais do cliente (quando for fazer upload/download).
+import shlex
 from pathlib import Path
 
-# Função que esconde toda a complexidade da rede e apenas recebe os dados da operação.
-from dfs.client import send_request
+from dfs.client import DFSClient
 
 
 def build_parser() -> argparse.ArgumentParser:
     """
     Monta a interface de linha de comando.
+
+    A CLI aceita comandos diretos ou, no modo interativo, entradas digitadas
+    pelo usuário a partir do menu.
     """
-    # Cria o avaliador (parser) base, batizando o programa de "dfs".
-    parser = argparse.ArgumentParser(prog="dfs")
-    
-    # Cria "subparsers" (subcomandos), como os usados no git (git clone, git pull, etc).
-    # dest="command" salvará a palavra digitada na propriedade args.command.
-    # required=True obriga o usuário a escolher uma opção.
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="dfs",
+        description="Cliente do DFS distribuído",
+    )
 
-    # Subcomando PUT.
+    sub = parser.add_subparsers(dest="command", required=False)
+
+    # ------------------------------------------------------------
+    # PUT
+    # ------------------------------------------------------------
     put = sub.add_parser("put", help="Envia um arquivo para o DFS")
-    put.add_argument("source", help="arquivo local de origem")    # Argumento obrigatório
-    put.add_argument("target", help="caminho lógico no DFS")      # Argumento obrigatório
+    put.add_argument("source", help="arquivo local de origem")
+    put.add_argument("target", help="caminho lógico no DFS")
 
-    # Subcomando GET.
+    # ------------------------------------------------------------
+    # GET
+    # ------------------------------------------------------------
     get = sub.add_parser("get", help="Lê um arquivo do DFS")
-    get.add_argument("path", help="caminho lógico no DFS")        # Argumento obrigatório
-    # nargs="?" significa que é opcional. Se não for passado, default será None.
-    get.add_argument("output", nargs="?", default=None, help="arquivo local de saída")
+    get.add_argument("path", help="caminho lógico no DFS")
+    get.add_argument(
+        "output",
+        nargs="?",
+        default=None,
+        help="arquivo local de saída",
+    )
 
-    # Subcomando LIST (não tem argumentos adicionais, ele apenas roda).
-    sub.add_parser("list", help="Lista arquivos no DFS")
+    # ------------------------------------------------------------
+    # LIST
+    # ------------------------------------------------------------
+    sub.add_parser("list", help="Lista entradas no DFS")
 
-    # Subcomando RM (Remove).
+    # ------------------------------------------------------------
+    # RM
+    # ------------------------------------------------------------
     rm = sub.add_parser("rm", help="Remove um arquivo do DFS")
-    rm.add_argument("path", help="caminho lógico no DFS")         # Argumento obrigatório
+    rm.add_argument("path", help="caminho lógico no DFS")
+
+    # ------------------------------------------------------------
+    # MKDIR
+    # ------------------------------------------------------------
+    mkdir = sub.add_parser("mkdir", help="Cria um diretório lógico no DFS")
+    mkdir.add_argument("path", help="caminho lógico do diretório")
+
+    # ------------------------------------------------------------
+    # RMDIR (se você já adicionou esse comando)
+    # ------------------------------------------------------------
+    rmdir = sub.add_parser("rmdir", help="Remove um diretório lógico vazio do DFS")
+    rmdir.add_argument("path", help="caminho lógico do diretório")
+
+    # ------------------------------------------------------------
+    # MENU INTERATIVO
+    # ------------------------------------------------------------
+    sub.add_parser("menu", help="Abre o menu interativo do DFS")
 
     return parser
 
-
-def main(argv=None) -> None:
+def print_menu() -> None:
     """
-    Executa o comando solicitado pelo usuário.
-    """
-    # Inicializa o parser e analisa os argumentos passados pelo terminal.
-    # Se argv for None, sys.argv é capturado automaticamente pelo argparse.
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    Exibe o menu principal do DFS em formato tabular.
 
-    # Bloco condicional para direcionar o subcomando recebido.
+    Layout:
+    - comandos à esquerda;
+    - exemplos à direita.
+    """
+
+    commands = [
+        ("put <origem> <dfs_path>", "Envia arquivo ao DFS"),
+        ("get <dfs_path> [saida]", "Baixa arquivo do DFS"),
+        ("rm <dfs_path>", "Remove arquivo"),
+        ("list", "Lista entradas"),
+        ("mkdir <dfs_path>", "Cria diretório"),
+        ("rmdir <dfs_path>", "Remove diretório vazio"),
+        ("exit | quit", "Encerra sessão"),
+    ]
+
+    examples = [
+        "put teste.txt docs/teste.txt",
+        "get docs/teste.txt copia.txt",
+        "mkdir docs",
+        "list",
+        "rm docs/teste.txt",
+        "rmdir docs",
+    ]
+
+    # ============================================================
+    # CABEÇALHO
+    # ============================================================
+
+    print()
+
+    print("=" * 110)
+    print("DFS DISTRIBUÍDO - MENU INTERATIVO")
+    print("=" * 110)
+
+    # ============================================================
+    # TÍTULOS
+    # ============================================================
+
+    left_title = "COMANDOS DISPONÍVEIS"
+    right_title = "EXEMPLOS"
+
+    print(
+        f"{left_title:<58}"
+        f"{right_title:<50}"
+    )
+
+    print(
+        f"{'-' * 56}  "
+        f"{'-' * 48}"
+    )
+
+    # ============================================================
+    # LINHAS
+    # ============================================================
+
+    max_rows = max(len(commands), len(examples))
+
+    for i in range(max_rows):
+
+        # ------------------------
+        # BLOCO ESQUERDO
+        # ------------------------
+
+        if i < len(commands):
+            cmd, desc = commands[i]
+
+            left = f"{cmd:<28} {desc:<27}"
+        else:
+            left = ""
+
+        # ------------------------
+        # BLOCO DIREITO
+        # ------------------------
+
+        if i < len(examples):
+            right = examples[i]
+        else:
+            right = ""
+
+        print(f"{left:<58}{right}")
+
+    # ============================================================
+    # RODAPÉ
+    # ============================================================
+
+    print("=" * 110)
+    print(
+        "Modo interativo ativo | conexão persistente com o coordenador"
+    )
+    print("=" * 110)
+    print()
+
+def _run_single_command(client: DFSClient, args: argparse.Namespace) -> None:
+    """
+    Executa um comando já interpretado pelo argparse.
+    """
     if args.command == "put":
-        # Path().read_bytes() lê o arquivo inteiro da máquina local do usuário para a memória RAM.
-        data = Path(args.source).read_bytes()
-        
-        # Pede para o client de rede enviar o pacote para o servidor.
-        response = send_request("PUT", path=args.target, data=data)
-        
-        # Imprime a mensagem retornada pelo servidor ("Arquivo salvo com sucesso").
+        source = Path(args.source)
+
+        if not source.exists():
+            print(f"Arquivo local não encontrado: {source}")
+            return
+
+        data = source.read_bytes()
+        response = client.send("PUT", path=args.target, data=data)
         print(response.message)
         return
 
     if args.command == "get":
-        # Faz a requisição de download para o servidor. Não precisa enviar data.
-        response = send_request("GET", path=args.path)
+        response = client.send("GET", path=args.path)
 
-        # Se a operação falhou (ex: arquivo não existe no DFS), imprime o erro e encerra o fluxo.
         if not response.ok:
             print(response.message)
             return
 
-        # Define onde salvar localmente.
-        # Usa o argumento passado ou, se não passado, usa o próprio nome original, 
-        # ou "saida.bin" como fallback final de emergência.
         output = args.output or Path(args.path).name or "saida.bin"
-        
-        # Escreve fisicamente no HD local do usuário os bytes retornados na resposta.
         Path(output).write_bytes(response.data)
         print(f"{response.message} -> salvo em {output}")
         return
 
     if args.command == "list":
-        # Envia a requisição LIST.
-        response = send_request("LIST")
+        response = client.send("LIST")
 
-        # Verifica falhas.
         if not response.ok:
             print(response.message)
             return
 
-        # Se não houver itens na lista (vazio).
         if not response.entries:
             print("(vazio)")
             return
 
-        # Itera sobre os caminhos devolvidos pelo servidor e os imprime um a um.
         for entry in response.entries:
             print(entry)
         return
 
     if args.command == "rm":
-        # Envia a instrução de exclusão ao servidor.
-        response = send_request("DELETE", path=args.path)
+        response = client.send("DELETE", path=args.path)
         print(response.message)
         return
 
+    if args.command == "mkdir":
+        response = client.send("MKDIR", path=args.path)
+        print(response.message)
+        return
 
-# Bloco padrão do Python para testar esse arquivo diretamente.
-# Contudo, o ponto de entrada principal pretendido está no arquivo __main__.py
+    if args.command == "rmdir":
+        response = client.send("RMDIR", path=args.path)
+        print(response.message)
+        return
+
+    if args.command == "menu":
+        interactive_menu()
+        return
+
+    print("Comando inválido.")
+    print_menu()
+
+
+def interactive_menu() -> None:
+    """
+    Abre um shell interativo com conexão persistente.
+
+    A mesma conexão TCP é reutilizada até o usuário sair.
+    """
+    parser = build_parser()
+
+    print_menu()
+
+    try:
+        with DFSClient() as client:
+            while True:
+                try:
+                    raw = input("dfs> ").strip()
+                except EOFError:
+                    print("\nEncerrando sessão.")
+                    break
+
+                if not raw:
+                    continue
+
+                lowered = raw.lower().strip()
+
+                if lowered in {"exit", "quit"}:
+                    print("Encerrando sessão.")
+                    break
+
+                if lowered in {"help", "menu", "?"}:
+                    print_menu()
+                    continue
+
+                try:
+                    argv = shlex.split(raw)
+                    args = parser.parse_args(argv)
+                except SystemExit:
+                    # O argparse pode tentar sair quando a entrada é inválida.
+                    print("Entrada inválida. Digite 'help' para ver os comandos.")
+                    continue
+                except ValueError as exc:
+                    print(f"Erro ao interpretar comando: {exc}")
+                    continue
+
+                if args.command is None:
+                    print("Nenhum comando informado. Digite 'help'.")
+                    continue
+
+                _run_single_command(client, args)
+
+    except Exception as exc:
+        print(f"Erro na sessão interativa: {exc}")
+
+
+def main(argv=None) -> None:
+    """
+    Executa a CLI.
+
+    Regras:
+    - sem argumentos -> abre menu interativo;
+    - com argumentos -> executa comando único;
+    - 'menu' -> abre menu interativo explicitamente.
+    """
+    parser = build_parser()
+
+    if argv is None:
+        argv = []
+
+    # Sem argumentos: comportamento interativo.
+    if len(argv) == 0:
+        interactive_menu()
+        return
+
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        return
+
+    if args.command == "menu":
+        interactive_menu()
+        return
+
+    with DFSClient() as client:
+        _run_single_command(client, args)
+
+
 if __name__ == "__main__":
     main()

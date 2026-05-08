@@ -82,3 +82,105 @@ class MetadataService:
     # def exists(self, path: str) -> bool:
     #     with self._lock:
     #         return path in self._index
+    def list_directories(self) -> list[str]:
+        """
+        Lista todos os diretórios lógicos registrados.
+        """
+
+        with self._lock:
+            directories = self._index.get("directories", {})
+            return sorted(directories.keys())
+
+    def directory_is_empty(self, path: str) -> bool:
+        """
+        Verifica se um diretório lógico está vazio.
+
+        Um diretório NÃO está vazio se:
+        - possuir arquivos;
+        - possuir subdiretórios.
+        """
+
+        normalized = path.rstrip("/")
+
+        with self._lock:
+
+            # Verifica arquivos.
+            for file_path in self._index.get("files", {}):
+
+                if file_path.startswith(f"{normalized}/"):
+                    return False
+
+            # Verifica subdiretórios.
+            for dir_path in self._index.get("directories", {}):
+
+                # Ignora o próprio diretório.
+                if dir_path == normalized:
+                    continue
+
+                if dir_path.startswith(f"{normalized}/"):
+                    return False
+
+        return True
+
+    def delete_directory(self, path: str) -> None:
+        """
+        Remove um diretório lógico do metadata.
+        """
+
+        with self._lock:
+
+            directories = self._index.get("directories", {})
+
+            directories.pop(path, None)
+
+            self._save()
+    def list_entries(self) -> list[str]:
+        """
+        Retorna uma visão unificada de arquivos e diretórios.
+
+        Esse formato é usado pela CLI no comando LIST.
+        """
+
+        with self._lock:
+            entries: list[str] = []
+
+            # =========================
+            # DIRETÓRIOS
+            # =========================
+
+            directories = self._index.get("directories", {})
+
+            for path in sorted(directories.keys()):
+                info = directories[path]
+
+                node_id = info.get("node_id", "-")
+                shard_id = info.get("shard_id", "-")
+
+                entries.append(
+                    f"[DIR ] {path}  (node={node_id}, shard={shard_id})"
+                )
+
+            # =========================
+            # ARQUIVOS
+            # =========================
+
+            files = self._index.get("files", {})
+
+            for path in sorted(files.keys()):
+                info = files[path]
+
+                chunks = info.get("chunks", [])
+
+                distribution = info.get("distribution", {})
+
+                nodes_used = distribution.get("nodes_used", [])
+
+                chunk_count = len(chunks)
+
+                entries.append(
+                    f"[FILE] {path}  "
+                    f"({chunk_count} chunk(s), "
+                    f"nodes={', '.join(nodes_used) if nodes_used else '-'})"
+                )
+
+            return entries

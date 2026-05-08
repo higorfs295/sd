@@ -1,8 +1,21 @@
 """
 DESCRIÇÃO GERAL:
-Esta é a camada de persistência local de cada nó.
-Ela manipula arquivos diretamente no disco e pode ser reaproveitada por qualquer
-nó do cluster, apenas mudando a raiz física onde os dados são salvos.
+Camada de persistência local utilizada pelos storage nodes.
+
+Cada nó possui:
+- um diretório raiz próprio;
+- arquivos/chunks físicos;
+- diretórios físicos internos.
+
+Esta classe abstrai:
+- leitura;
+- escrita;
+- remoção;
+- criação de diretórios;
+- remoção de diretórios.
+
+O coordenador NÃO manipula disco diretamente.
+Tudo passa por esta camada.
 """
 
 from pathlib import Path
@@ -12,60 +25,106 @@ from dfs.config import STORAGE_DIR
 
 class LocalStorage:
     """
-    Implementa o armazenamento local de um nó.
+    Implementa o armazenamento local físico de um nó.
     """
 
     def __init__(self, root: Path | None = None):
-        # Se nenhum diretório for informado, usa a raiz padrão.
+        """
+        Inicializa o storage local.
+        """
+
         self.root = Path(root) if root is not None else STORAGE_DIR
 
-        # Garante que a pasta de armazenamento exista.
+        # Garante existência da raiz física do nó.
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _resolve_path(self, path: str) -> Path:
         """
-        Resolve o caminho final e protege contra path traversal simples.
+        Resolve caminhos relativos de forma segura.
+
+        Também protege contra path traversal simples.
         """
-        # Resolve o caminho completo do arquivo.
+
         target = (self.root / path).resolve()
 
-        # Garante que o caminho final continue dentro da raiz do storage.
         root_resolved = self.root.resolve()
+
         if root_resolved not in target.parents and target != root_resolved:
             raise ValueError("Caminho inválido fora da raiz do storage")
 
         return target
 
+    # ============================================================
+    # ARQUIVOS
+    # ============================================================
+
     def put(self, path: str, data: bytes) -> None:
         """
-        Salva um arquivo em disco.
+        Salva um arquivo físico no nó.
         """
+
         target = self._resolve_path(path)
 
-        # Cria diretórios intermediários se necessário.
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        # Escreve os bytes no arquivo.
         target.write_bytes(data)
 
     def get(self, path: str) -> bytes:
         """
-        Lê um arquivo do armazenamento local.
+        Recupera um arquivo físico.
         """
+
         target = self._resolve_path(path)
+
         return target.read_bytes()
 
     def delete(self, path: str) -> None:
         """
-        Remove um arquivo do disco.
+        Remove um arquivo físico do nó.
         """
+
         target = self._resolve_path(path)
-        target.unlink()
+
+        if target.exists():
+            target.unlink()
+
+    # ============================================================
+    # DIRETÓRIOS
+    # ============================================================
+
+    def mkdir(self, path: str) -> None:
+        """
+        Cria um diretório físico.
+        """
+
+        target = self._resolve_path(path)
+
+        target.mkdir(parents=True, exist_ok=True)
+
+    def rmdir(self, path: str) -> None:
+        """
+        Remove um diretório físico.
+
+        IMPORTANTE:
+        rmdir() só remove diretórios vazios.
+        """
+
+        target = self._resolve_path(path)
+
+        if not target.exists():
+            return
+
+        target.rmdir()
+
+    # ============================================================
+    # LISTAGEM
+    # ============================================================
 
     def list_files(self) -> list[str]:
         """
-        Lista todos os arquivos armazenados de forma recursiva.
+        Lista todos os arquivos físicos armazenados.
         """
+
         return sorted(
             p.relative_to(self.root).as_posix()
             for p in self.root.rglob("*")

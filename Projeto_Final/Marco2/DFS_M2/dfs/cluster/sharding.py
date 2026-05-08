@@ -1,75 +1,186 @@
 """
 DESCRIÇÃO GERAL:
-Este módulo decide em qual shard um arquivo deve ser colocado.
-No Marco 2, a estratégia mais simples é usar hashing do caminho lógico do arquivo
-e mapear o resultado para um nó do cluster.
+Este módulo implementa a lógica de sharding do DFS.
+
+Sharding significa:
+dividir os dados entre múltiplos nós do cluster.
+
+Aqui usamos uma estratégia determinística baseada em hash:
+- o mesmo caminho sempre gera o mesmo shard;
+- o mesmo chunk sempre gera o mesmo nó primário;
+- a distribuição permanece previsível.
+
+Além disso:
+- chunks diferentes tendem a ir para nós diferentes;
+- existe suporte a fallback;
+- o coordenador consegue redistribuir operações automaticamente.
 """
 
 from hashlib import sha256
+
 from dfs.cluster.node_registry import NodeRegistry, NodeInfo
 
 
 class ShardingManager:
     """
-    Implementa sharding físico por chunks
+    Responsável pelas decisões de distribuição do cluster.
 
-    Aqui o arquivo é dividido em blocos físicos
-    Cada chunk pode ir para um nó diferente
-
-    Isso prepara o DFS para:
-    - paralelismo
-    - arquivos grandes
-    - balanceamento melhor
-    - replicação futura por chunk
+    Esta classe NÃO salva dados.
+    Ela apenas responde:
+    - qual shard usar;
+    - qual nó usar;
+    - quais nós tentar em fallback.
     """
 
     def __init__(self, registry: NodeRegistry | None = None):
-        # Reaproveita o cadastro dos nós
+        """
+        Inicializa o gerenciador de sharding.
+
+        Se nenhum registry for informado,
+        utiliza automaticamente o NodeRegistry padrão.
+        """
         self.registry = registry or NodeRegistry()
 
-    # Gera um hash estável do caminho lógico para garantir que o mesmo arquivo sempre tenha a mesma distribuição de chunks
     def _stable_hash(self, text: str) -> int:
-        digest = sha256(text.encode("utf-8")).digest()
-        # Usa os primeiros bytes do hash como um inteiro para obter um valor numérico consistente para o caminho
-        return int.from_bytes(digest[:8], byteorder="big", signed=False)
+        """
+        Gera um hash determinístico estável.
 
-    # Calcula o shard base para um caminho lógico, que é usado como ponto de partida para distribuir os chunks
-    def base_shard_for_path(self, path: str) -> int:
-        # Aplica a divisão modular para escolher o shard base, garantindo que o mesmo caminho sempre gere o mesmo shard base 
-        return self._stable_hash(path) % self.registry.size()
+        SHA-256 é usado apenas como fonte de bits.
+        Convertendo parte do digest para inteiro,
+        conseguimos usar operação modular (%).
+        """
+
+        digest = sha256(text.encode("utf-8")).digest()
+
+        return int.from_bytes(
+            digest[:8],
+            byteorder="big",
+            signed=False,
+        )
+
+    def _ensure_cluster_available(self) -> int:
+        """
+        Garante que o cluster possui nós disponíveis.
+        """
+
+        total = self.registry.size()
+
+        if total <= 0:
+            raise RuntimeError("Nenhum nó disponível no cluster")
+
+        return total
+
+    # ============================================================
+    # SHARDING POR CAMINHO
+    # ============================================================
+
+    def shard_for_path(self, path: str) -> int:
+        """
+        Calcula o shard primário de um caminho lógico.
+
+        Exemplo:
+            docs/teste.txt -> shard 1
+        """
+
+        total = self._ensure_cluster_available()
+
+        return self._stable_hash(path) % total
+
+    def node_for_path(self, path: str) -> NodeInfo:
+        """
+        Retorna o nó primário responsável por um caminho lógico.
+        """
+
+        shard_id = self.shard_for_path(path)
+
+        return self.registry.get_by_index(shard_id)
+
+    def node_candidates_for_path(self, path: str) -> list[NodeInfo]:
+        """
+        Retorna todos os candidatos possíveis para fallback.
+
+        Ordem:
+        - primeiro nó primário;
+        - depois os demais em rotação circular.
+        """
+
+        total = self._ensure_cluster_available()
+
+        start = self.shard_for_path(path)
+
+        return [
+            self.registry.get_by_index(start + offset)
+            for offset in range(total)
+        ]
+
+    # ============================================================
+    # SHARDING POR CHUNK
+    # ============================================================
 
     def shard_for_chunk(self, path: str, chunk_id: int) -> int:
         """
-        Distribui chunks de forma determinística
+        Calcula o shard de um chunk específico.
 
-        A estratégia usada é:
-            base_shard = hash(path) % total_nodes
-            shard_id = (base_shard + chunk_id) % total_nodes
+        A chave mistura:
+        - caminho lógico;
+        - número do chunk.
 
-        Assim:
-        - o mesmo arquivo sempre gera a mesma distribuição
-        - chunks consecutivos tendem a cair em nós diferentes
-        - o balanceamento inicial é simples
+        Isso ajuda a espalhar os chunks pelo cluster.
         """
-        base = self.base_shard_for_path(path)
-        return (base + chunk_id) % self.registry.size()
 
-    # Retorna o nó responsável por um chunk específico de um arquivo
+        total = self._ensure_cluster_available()
+
+        key = f"{path}::{chunk_id}"
+
+        return self._stable_hash(key) % total
+
     def node_for_chunk(self, path: str, chunk_id: int) -> NodeInfo:
-        # Calcula o shard para o chunk usando a função de distribuição e retorna o nó correspondente
+        """
+        Retorna o nó primário responsável pelo chunk.
+        """
+
         shard_id = self.shard_for_chunk(path, chunk_id)
+
         return self.registry.get_by_index(shard_id)
+
+    def node_candidates_for_chunk(
+        self,
+        path: str,
+        chunk_id: int,
+    ) -> list[NodeInfo]:
+        """
+        Retorna a lista de fallback para um chunk.
+
+        Exemplo:
+            node2 -> node3 -> node1
+        """
+
+        total = self._ensure_cluster_available()
+
+        start = self.shard_for_chunk(path, chunk_id)
+
+        return [
+            self.registry.get_by_index(start + offset)
+            for offset in range(total)
+        ]
+
+    # ============================================================
+    # STORAGE PATHS
+    # ============================================================
 
     def chunk_storage_path(self, path: str, chunk_id: int) -> str:
         """
-        Gera o caminho físico do chunk dentro do storage node
-        O caminho lógico do usuário é transformado para evitar colisões simples
+        Gera o caminho físico interno do chunk.
+
+        O usuário nunca vê esse caminho diretamente.
+        Ele existe apenas dentro dos storage nodes.
         """
-        safe_name = ( # Substituições por underscores para evitar hierarquia de pasta
+
+        safe_name = (
             path.replace("/", "_")
             .replace("\\", "_")
             .replace(":", "_")
             .replace(" ", "_")
         )
-        # O nome do chunk inclui o ID do chunk formatado para garantir ordenação correta
+
         return f".chunks/{safe_name}/chunk_{chunk_id:06d}"

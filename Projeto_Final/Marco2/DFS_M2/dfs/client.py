@@ -1,8 +1,10 @@
 """
 DESCRIÇÃO GERAL:
-Cliente persistente do DFS
+Cliente persistente do DFS.
 
-Mantém uma única conexão TCP aberta com o coordenador durante toda a vida do objeto, evitando o overhead de abrir e fechar socket a cada requisição
+A diferença principal agora é que a conexão TCP é mantida viva enquanto o objeto
+DFSClient existir. Isso evita abrir e fechar socket a cada requisição dentro
+do mesmo processo.
 """
 
 import socket
@@ -14,7 +16,7 @@ from dfs.pb.protocol import make_request, parse_response
 
 class DFSClient:
     """
-    Cliente persistente para o coordenador do DFS
+    Cliente persistente para o coordenador do DFS.
 
     Uso:
         with DFSClient() as client:
@@ -28,31 +30,45 @@ class DFSClient:
         port: int = COORDINATOR_PORT,
         timeout: float = 10.0,
     ):
-        # O socket é criado já no __init__ e mantido vivo até o close
-        # Isso elimina a necessidade de um método connect() separado e de checar "if _sock is None" antes de cada send
-        self._sock = socket.create_connection((host, port), timeout=timeout)
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self._sock: socket.socket | None = None
+        self._connect()
+
+    def _connect(self) -> None:
+        """
+        Abre a conexão TCP apenas uma vez.
+        """
+        if self._sock is None:
+            self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
 
     def send(self, op: str, path: str = "", data: bytes = b""):
         """
-        Envia uma requisição reusando a conexão atual
+        Envia uma requisição usando a conexão persistente atual.
         """
-        # Serializa a mensagem em Protobuf e envia com framing por tamanho
+        if self._sock is None:
+            self._connect()
+
+        assert self._sock is not None
+
         raw_request = make_request(op=op, path=path, data=data)
         send_frame(self._sock, raw_request)
-
-        # Aguarda a resposta enquadrada e devolve já desserializada
         raw_response = recv_frame(self._sock)
         return parse_response(raw_response)
 
     def close(self) -> None:
-        # Fecha a conexão TCP
+        """
+        Fecha a conexão TCP.
+        """
+        if self._sock is None:
+            return
+
         try:
             self._sock.close()
-        except Exception:
-            # Socket já estava fechado ou em estado inválido
-            pass
+        finally:
+            self._sock = None
 
-    # Suporte a 'with DFSClient() as client:'
     def __enter__(self) -> "DFSClient":
         return self
 
@@ -60,11 +76,15 @@ class DFSClient:
         self.close()
 
 
-def send_request(op: str, path: str = "", data: bytes = b""):
+def send_request(op: str, path: str = "", data: bytes = b"", client: DFSClient | None = None):
     """
-    Wrapper para uma única operação para vários comandos da CLI
-    Usada pela CLI para enviar requisições para comandos diferentes e dentro de uma única conexão TCP persistente
-    Evitando overhead de abrir/fechar socket a cada comando
+    Wrapper de compatibilidade.
+
+    Se um cliente já estiver aberto, ele é reaproveitado.
+    Caso contrário, um cliente temporário é criado e fechado ao final.
     """
-    with DFSClient() as client:
+    if client is not None:
         return client.send(op, path=path, data=data)
+
+    with DFSClient() as temp_client:
+        return temp_client.send(op, path=path, data=data)

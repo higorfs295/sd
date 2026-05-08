@@ -7,12 +7,14 @@ Este projeto implementa um **Sistema de Arquivos Distribuído (DFS)** em Python,
 No **Marco 2**, o sistema deixa de operar como um armazenamento centralizado e passa a trabalhar com uma arquitetura distribuída formada por:
 
 - múltiplos nós de armazenamento;
-- particionamento de arquivos por shard;
+- particionamento de arquivos por shard e por chunk;
 - coordenador responsável por rotear requisições;
 - comunicação entre processos independentes;
-- armazenamento local isolado por nó.
+- armazenamento local isolado por nó;
+- metadados persistentes com visão lógica e física do sistema;
+- suporte a diretórios lógicos no namespace distribuído.
 
-A meta deste marco é demonstrar que o sistema consegue distribuir os arquivos corretamente entre os nós, manter a execução organizada e preparar a base para os próximos marcos, como replicação, consistência e tolerância a falhas.
+A meta deste marco é demonstrar que o sistema consegue distribuir os arquivos corretamente entre os nós, manter a execução organizada, expor melhor a distribuição real dos chunks e preparar a base para os próximos marcos, como replicação, consistência, tolerância a falhas e reequilíbrio. :contentReference[oaicite:1]{index=1}
 
 ---
 
@@ -26,7 +28,7 @@ O DFS foi organizado em camadas, de forma a separar bem responsabilidades e faci
   Responsável por interpretar os comandos do usuário e enviar as requisições ao sistema.
 
 - **Coordenador**  
-  Recebe as requisições da CLI, calcula o shard do arquivo e encaminha a operação para o nó correto.
+  Recebe as requisições da CLI, calcula o shard do arquivo ou diretório e encaminha a operação para o nó correto.
 
 - **Nós de armazenamento**  
   Cada nó mantém seu próprio armazenamento local e executa as operações de forma independente.
@@ -38,32 +40,38 @@ O DFS foi organizado em camadas, de forma a separar bem responsabilidades e faci
 ### Visão dos componentes
 
 - o **CLI** conversa com o coordenador;
-- o **coordenador** decide onde cada arquivo deve ficar;
+- o **coordenador** decide onde cada arquivo ou diretório deve ficar;
 - o **shard manager** define a regra de distribuição;
 - o **node registry** mantém os nós cadastrados;
 - o **node client** faz a comunicação interna entre coordenador e nós;
 - o **node service** executa as operações dentro de cada nó;
-- o **local storage** grava, lê, remove e lista arquivos no disco;
+- o **local storage** grava, lê, remove e lista arquivos e diretórios no disco;
 - o **protocol** traduz objetos Python em bytes Protobuf e vice-versa;
-- o **frame** garante que as mensagens TCP sejam lidas corretamente.
+- o **frame** garante que as mensagens TCP sejam lidas corretamente;
+- o **metadata service** mantém o índice lógico de arquivos e diretórios;
+- o **cliente persistente** evita abrir e fechar socket a cada comando dentro da sessão. :contentReference[oaicite:2]{index=2}
 
 ---
 
 ## ⚙️ Funcionalidades
 
-O sistema suporta as operações básicas esperadas de um DFS:
+O sistema suporta as operações básicas esperadas de um DFS e também comandos de gerenciamento de namespace:
 
 - **PUT**: envia um arquivo local para o DFS;
 - **GET**: recupera um arquivo do DFS para a máquina local;
 - **RM**: remove um arquivo do DFS;
-- **LIST**: lista os arquivos distribuídos entre os nós.
+- **LIST**: lista as entradas conhecidas pelo índice;
+- **MKDIR**: cria um diretório lógico no DFS;
+- **RMDIR**: remove um diretório lógico vazio do DFS.
 
 ### Comportamento das operações
 
-- **PUT**: o coordenador calcula o shard do caminho lógico e encaminha o arquivo ao nó responsável;
-- **GET**: o coordenador localiza o nó dono do arquivo e solicita seu conteúdo;
-- **RM**: o arquivo é removido no nó responsável;
-- **LIST**: o coordenador consulta todos os nós e consolida as respostas em uma listagem única.
+- **PUT**: o coordenador divide o arquivo em chunks, calcula o shard de cada chunk, tenta enviar ao nó primário e usa fallback caso necessário, registrando tudo em metadados;
+- **GET**: o coordenador consulta o índice de metadados, localiza os chunks e reconstrói o arquivo original;
+- **RM**: o arquivo é removido em todos os nós onde seus chunks estão armazenados e, se tudo der certo, o metadado é removido;
+- **LIST**: o coordenador lê o índice lógico e retorna arquivos e diretórios conhecidos;
+- **MKDIR**: o coordenador cria e registra um diretório lógico, com persistência no metadata e criação física no nó responsável;
+- **RMDIR**: o coordenador remove diretórios vazios, validando primeiro o namespace lógico. :contentReference[oaicite:3]{index=3}
 
 ---
 
@@ -71,15 +79,15 @@ O sistema suporta as operações básicas esperadas de um DFS:
 
 ### Sharding
 
-A distribuição dos arquivos é feita com base no hash do caminho lógico:
-
-    hash(path) % número_de_nós
+A distribuição dos arquivos é feita de forma determinística com base em hash.  
+No estado atual, a distribuição é feita por chunk, usando o caminho lógico e o índice do chunk como base de decisão. Isso permite espalhar os pedaços entre os nós e tornar a distribuição mais clara, observável e auditável.
 
 Isso garante que:
 
-- o mesmo caminho sempre vá para o mesmo nó;
+- o mesmo caminho e chunk sempre gerem a mesma decisão base;
 - a distribuição seja determinística;
-- o balanceamento inicial seja simples e previsível.
+- o balanceamento inicial seja simples e previsível;
+- a separação dos chunks entre nós fique mais explícita nos logs e nos metadados. :contentReference[oaicite:4]{index=4}
 
 ### Node ID
 
@@ -88,7 +96,16 @@ Esse campo ajuda na rastreabilidade das requisições dentro do cluster.
 
 ### Shard ID
 
-Representa a partição lógica usada para decidir onde o arquivo será armazenado.
+Representa a partição lógica usada para decidir onde o arquivo ou chunk será armazenado.
+
+### Resumo de distribuição
+
+Os metadados agora guardam um resumo da distribuição de cada arquivo, incluindo:
+
+- quantidade de chunks;
+- nós utilizados;
+- estratégia de distribuição;
+- indicação de fallback quando necessário.
 
 ### Comunicação TCP
 
@@ -97,7 +114,7 @@ O Protobuf é usado apenas como formato de serialização das mensagens.
 
 ### Framing
 
-Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por tamanho para garantir que cada mensagem seja lida corretamente e sem mistura com outras.
+Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por tamanho para garantir que cada mensagem seja lida corretamente e sem mistura com outras. :contentReference[oaicite:5]{index=5}
 
 ---
 
@@ -124,6 +141,7 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
     │   │       ├── application/
     │   │       │   ├── __init__.py
     │   │       │   ├── file_service.py
+    │   │       │   ├── metadata_service.py
     │   │       │   └── node_service.py
     │   │       │
     │   │       ├── cluster/
@@ -189,12 +207,13 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
   Traduz as mensagens Protobuf entre bytes e objetos Python.
 
 - **`client.py`**  
-  Cliente TCP usado pela CLI para falar com o coordenador.
+  Cliente TCP persistente usado pela CLI para falar com o coordenador.
 
 ### Pasta `interface/`
 
 - **`cli.py`**  
-  Interface de linha de comando. Interpreta `put`, `get`, `rm` e `list`.
+  Interface de linha de comando. Interpreta `put`, `get`, `rm`, `list`, `mkdir` e `rmdir`.  
+  Também oferece modo interativo com menu de uso.
 
 - **`server.py`**  
   Coordenador principal do DFS. Recebe as requisições da CLI e roteia para o nó correto.
@@ -205,7 +224,10 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
 ### Pasta `application/`
 
 - **`file_service.py`**  
-  Camada de serviço do coordenador. Decide o destino da operação e faz o encaminhamento.
+  Camada de serviço do coordenador. Decide o destino da operação, faz o encaminhamento e lida com distribuição por chunks, fallback e metadados.
+
+- **`metadata_service.py`**  
+  Serviço de índice lógico do DFS. Mantém arquivos, chunks e diretórios persistidos em JSON.
 
 - **`node_service.py`**  
   Camada de serviço que roda dentro de cada nó e executa as operações localmente.
@@ -216,7 +238,7 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
   Mantém a lista de nós disponíveis, seus hosts, portas e diretórios.
 
 - **`shard_manager.py`**  
-  Calcula o shard responsável por cada caminho lógico.
+  Calcula o shard responsável por cada caminho lógico e por cada chunk, além de fornecer ordem de fallback.
 
 - **`node_client.py`**  
   Cliente interno que o coordenador usa para se comunicar com um nó.
@@ -224,7 +246,7 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
 ### Pasta `storage/`
 
 - **`local_storage.py`**  
-  Implementa o armazenamento local do nó: salvar, ler, apagar e listar arquivos.
+  Implementa o armazenamento local do nó: salvar, ler, apagar, criar e remover diretórios, além de listar arquivos.
 
 ### Pasta `pb/`
 
@@ -337,9 +359,17 @@ Em outro terminal, com a venv ativada:
 Exemplos:
 
     python run_cli.py list
+    python run_cli.py mkdir docs
     python run_cli.py put DFS_M2/teste.txt docs/teste.txt
     python run_cli.py get docs/teste.txt copia.txt
     python run_cli.py rm docs/teste.txt
+    python run_cli.py rmdir docs
+
+Também é possível executar a CLI em modo interativo:
+
+    python run_cli.py
+
+Nesse modo, a interface exibe o menu de uso e mantém uma conexão persistente com o coordenador durante toda a sessão.
 
 ---
 
@@ -353,7 +383,7 @@ Exemplos:
 
     python run_cli.py put DFS_M2/teste.txt docs/teste.txt
 
-### Listar arquivos
+### Listar entradas
 
     python run_cli.py list
 
@@ -365,13 +395,25 @@ Exemplos:
 
     python run_cli.py rm docs/teste.txt
 
+### Criar diretório
+
+    python run_cli.py mkdir docs
+
+### Remover diretório vazio
+
+    python run_cli.py rmdir docs
+
+### Abrir modo interativo
+
+    python run_cli.py
+
 ---
 
 ## 🔍 Fluxos de Operação
 
 ### PUT
 
-    CLI → Coordenador → Shard responsável → Nó → Disco local
+    CLI → Coordenador → Shard responsável pelo chunk → Nó → Disco local
 
 ### GET
 
@@ -383,7 +425,15 @@ Exemplos:
 
 ### LIST
 
-    Coordenador consulta todos os nós → consolida as respostas → retorna a listagem
+    Coordenador consulta o índice de metadados → consolida as respostas → retorna a listagem lógica
+
+### MKDIR
+
+    CLI → Coordenador → Nó responsável → Criação do diretório físico e registro no metadata
+
+### RMDIR
+
+    CLI → Coordenador → Nó responsável → Remoção do diretório físico e atualização do metadata
 
 ---
 
@@ -392,10 +442,14 @@ Exemplos:
 - uso de **socket TCP puro** para comunicação entre processos;
 - uso de **Protobuf** para serialização compacta e estruturada;
 - uso de **framing por tamanho** para resolver o problema do fluxo contínuo do TCP;
-- separação clara entre interface, rede, aplicação, cluster e armazenamento;
+- separação clara entre interface, rede, aplicação, cluster, armazenamento e metadados;
 - distribuição determinística dos arquivos por hash;
 - roteamento centralizado pelo coordenador;
-- execução independente dos nós de armazenamento.
+- execução independente dos nós de armazenamento;
+- cliente persistente durante a sessão interativa;
+- suporte a diretórios lógicos no namespace do DFS;
+- logs por chunk para facilitar auditoria da distribuição;
+- fallback determinístico de nós em caso de falha de envio. :contentReference[oaicite:6]{index=6}
 
 ---
 
@@ -405,7 +459,11 @@ Exemplos:
 - distribuição correta dos dados;
 - balanceamento inicial simples;
 - comunicação entre nós via socket;
-- estrutura pronta para expansão futura.
+- estrutura pronta para expansão futura;
+- namespace lógico com diretórios;
+- melhor rastreabilidade da distribuição por chunk;
+- cliente com uso persistente em modo interativo;
+- capacidade de fallback entre nós. :contentReference[oaicite:7]{index=7}
 
 ---
 
@@ -416,7 +474,9 @@ Exemplos:
 - portas já ocupadas por processos antigos;
 - diretórios dos nós inexistentes;
 - usar comandos da CLI sem o formato correto;
-- executar o `put` com caminho local inexistente.
+- executar o `put` com caminho local inexistente;
+- tentar remover diretório não vazio com `rmdir`;
+- usar metadados antigos incompatíveis com o novo formato de índice.
 
 ---
 
@@ -429,7 +489,10 @@ O projeto está preparado para evoluir para os próximos marcos:
 - tolerância a falhas;
 - detecção por heartbeat;
 - re-replicação automática;
-- testes de escalabilidade.
+- testes de escalabilidade;
+- comando de inspeção por arquivo;
+- visualização da distribuição de chunks;
+- rebalanceamento automático.
 
 ---
 
@@ -437,12 +500,14 @@ O projeto está preparado para evoluir para os próximos marcos:
 
 - o sistema usa hashing determinístico para roteamento;
 - não há replicação no Marco 2;
-- cada arquivo pertence a um único nó responsável;
+- cada chunk pertence a um nó responsável, com fallback em caso de falha;
 - o armazenamento é local em cada nó;
 - a comunicação continua baseada em sockets TCP;
 - o coordenador consolida as respostas quando necessário;
 - o caminho local do arquivo deve existir antes do envio;
-- o caminho lógico informado no DFS pode ser diferente do caminho do arquivo na máquina local.
+- o caminho lógico informado no DFS pode ser diferente do caminho do arquivo na máquina local;
+- a listagem lógica agora inclui arquivos e diretórios;
+- o modo interativo da CLI mantém a conexão viva até o usuário sair.
 
 ---
 
