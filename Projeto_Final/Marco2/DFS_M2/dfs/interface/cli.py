@@ -257,16 +257,20 @@ def interactive_menu() -> None:
                 except SystemExit:
                     # O argparse pode tentar sair quando a entrada é inválida.
                     print("Entrada inválida. Digite 'help' para ver os comandos.")
+                    print()
                     continue
                 except ValueError as exc:
                     print(f"Erro ao interpretar comando: {exc}")
+                    print()
                     continue
 
                 if args.command is None:
                     print("Nenhum comando informado. Digite 'help'.")
+                    print()
                     continue
 
                 _run_single_command(client, args)
+                print()
 
     except Exception as exc:
         print(f"Erro na sessão interativa: {exc}")
