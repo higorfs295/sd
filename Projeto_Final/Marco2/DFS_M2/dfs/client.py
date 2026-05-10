@@ -28,7 +28,7 @@ class DFSClient:
         self,
         host: str = COORDINATOR_HOST,
         port: int = COORDINATOR_PORT,
-        timeout: float = 10.0,
+        timeout: float = 300.0,
     ):
         self.host = host
         self.port = port

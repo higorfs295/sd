@@ -78,44 +78,32 @@ class LocalStorage:
 
         return target.read_bytes()
 
-    def delete(self, path: str) -> None:
+    def delete(self, logical_path: str) -> None:
         """
-        Remove um arquivo físico do nó.
+        Remove o chunk e limpa as pastas vazias (.chunks/nome_do_arquivo/)
         """
+        physical_path = self._resolve_path(logical_path)
 
-        target = self._resolve_path(path)
+        # 1. Remove o arquivo do chunk
+        if physical_path.exists():
+            physical_path.unlink()
 
-        if target.exists():
-            target.unlink()
-
+        # 2. Primeira tentativa: Remove a pasta do arquivo (ex: .chunks/meu_video.mp4/)
+        try:
+            parent_dir = physical_path.parent
+            if parent_dir.exists():
+                parent_dir.rmdir()
+                
+                # 3. Segunda tentativa: Remove a pasta .chunks/ se ela ficou vazia
+                # Só chegamos aqui se a pasta do arquivo foi removida com sucesso
+                grandparent_dir = parent_dir.parent
+                if grandparent_dir.name == ".chunks" and grandparent_dir.exists():
+                    grandparent_dir.rmdir()
+        except OSError:
+            # Se qualquer uma das pastas ainda tiver conteúdo (outros arquivos ou chunks),
+            # o Python ignora e interrompe a limpeza automática naquele nível.
+            pass
     # ============================================================
-    # DIRETÓRIOS
-    # ============================================================
-
-    def mkdir(self, path: str) -> None:
-        """
-        Cria um diretório físico.
-        """
-
-        target = self._resolve_path(path)
-
-        target.mkdir(parents=True, exist_ok=True)
-
-    def rmdir(self, path: str) -> None:
-        """
-        Remove um diretório físico.
-
-        IMPORTANTE:
-        rmdir() só remove diretórios vazios.
-        """
-
-        target = self._resolve_path(path)
-
-        if not target.exists():
-            return
-
-        target.rmdir()
-
     # ============================================================
     # LISTAGEM
     # ============================================================

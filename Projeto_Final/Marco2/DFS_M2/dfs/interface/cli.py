@@ -65,18 +65,6 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("path", help="caminho lógico no DFS")
 
     # ------------------------------------------------------------
-    # MKDIR
-    # ------------------------------------------------------------
-    mkdir = sub.add_parser("mkdir", help="Cria um diretório lógico no DFS")
-    mkdir.add_argument("path", help="caminho lógico do diretório")
-
-    # ------------------------------------------------------------
-    # RMDIR (se você já adicionou esse comando)
-    # ------------------------------------------------------------
-    rmdir = sub.add_parser("rmdir", help="Remove um diretório lógico vazio do DFS")
-    rmdir.add_argument("path", help="caminho lógico do diretório")
-
-    # ------------------------------------------------------------
     # MENU INTERATIVO
     # ------------------------------------------------------------
     sub.add_parser("menu", help="Abre o menu interativo do DFS")
@@ -98,8 +86,6 @@ def print_menu() -> None:
         ("get <dfs_path> [local_file]", "Baixa arquivo do DFS."),
         ("rm <dfs_path>", "Remove arquivo do DFS."),
         ("list", "Lista entradas no DFS."),
-        ("mkdir <dfs_path>", "Cria diretório."),
-        ("rmdir <dfs_path>", "Remove diretório vazio."),
         ("exit | quit", "Encerra sessão."),
     ]
 
@@ -108,8 +94,6 @@ def print_menu() -> None:
         "get docs/teste.txt copia.txt",
         "rm docs/teste.txt",
         "list",
-        "mkdir docs",
-        "rmdir docs",
     ]
 
     # ============================================================
@@ -218,16 +202,6 @@ def _run_single_command(client: DFSClient, args: argparse.Namespace) -> None:
 
     if args.command == "rm":
         response = client.send("DELETE", path=args.path)
-        print(response.message)
-        return
-
-    if args.command == "mkdir":
-        response = client.send("MKDIR", path=args.path)
-        print(response.message)
-        return
-
-    if args.command == "rmdir":
-        response = client.send("RMDIR", path=args.path)
         print(response.message)
         return
 

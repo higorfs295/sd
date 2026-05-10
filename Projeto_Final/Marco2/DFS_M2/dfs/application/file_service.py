@@ -9,7 +9,6 @@ Agora ela também:
 - mostra a distribuição chunk por chunk;
 - registra resumo da distribuição;
 - usa fallback de nós quando o primário falha;
-- suporta criação de diretórios lógicos (MKDIR).
 """
 
 from collections import Counter
@@ -34,7 +33,6 @@ class FileService:
     - reconstruir arquivos no GET
     - remover chunks no DELETE
     - listar arquivos e diretórios pelo índice
-    - criar diretórios lógicos com MKDIR
     """
 
     def __init__(
@@ -42,7 +40,7 @@ class FileService:
         registry: NodeRegistry | None = None,
         sharding: ShardingManager | None = None,
         metadata: MetadataService | None = None,
-        timeout: float = 5.0,
+        timeout: float = 60.0,
     ):
         self.registry = registry or NodeRegistry()
         self.sharding = sharding or ShardingManager(self.registry)
@@ -355,87 +353,6 @@ class FileService:
             shard_id=-1,
         )
 
-    def _mkdir(self, request):
-        """
-        Trata a criação de diretórios lógicos no DFS.
-
-        A criação é:
-        - registrada em metadados;
-        - enviada para um nó primário;
-        - protegida por fallback, caso o nó primário falhe.
-        """
-        request_path = self._normalize_path(request.path)
-
-        if not request_path:
-            return make_response(
-                False,
-                "Caminho do diretório vazio",
-                node_id="coordinator",
-                shard_id=-1,
-            )
-
-        if self.metadata.exists_file(request_path):
-            return make_response(
-                False,
-                "Já existe um arquivo com esse caminho",
-                node_id="coordinator",
-                shard_id=-1,
-            )
-
-        if self.metadata.exists_directory(request_path):
-            return make_response(
-                True,
-                "Diretório já existia",
-                node_id="coordinator",
-                shard_id=-1,
-            )
-
-        candidates = self.sharding.node_candidates_for_path(request_path)
-        primary_node = candidates[0]
-        primary_shard_id = self.sharding.shard_for_path(request_path)
-
-        try:
-            response, chosen_node, attempts = self._send_with_fallback(
-                candidates=candidates,
-                op="MKDIR",
-                path=request_path,
-                shard_id=primary_shard_id,
-            )
-
-            if not response.ok:
-                return make_response(
-                    False,
-                    f"Falha ao criar diretório: {response.message}",
-                    node_id=chosen_node.node_id,
-                    shard_id=primary_shard_id,
-                )
-
-            self.metadata.put_directory(
-                request_path,
-                node_id=chosen_node.node_id,
-                shard_id=self.registry.index_of(chosen_node.node_id),
-                fallback_used=attempts > 1,
-            )
-
-            message = f"Diretório criado com sucesso em {chosen_node.node_id}"
-            if attempts > 1:
-                message += " (via fallback)"
-
-            return make_response(
-                True,
-                message,
-                node_id=chosen_node.node_id,
-                shard_id=self.registry.index_of(chosen_node.node_id),
-            )
-
-        except Exception as exc:
-            return make_response(
-                False,
-                f"Erro no MKDIR distribuído: {exc}",
-                node_id="coordinator",
-                shard_id=-1,
-            )
-
     def _list(self):
         """
         Lista entradas lógicas do DFS.
@@ -466,8 +383,6 @@ class FileService:
                 return self._get(request)
             if op == "DELETE":
                 return self._delete(request)
-            if op == "MKDIR":
-                return self._mkdir(request)
             if op == "LIST":
                 return self._list()
 

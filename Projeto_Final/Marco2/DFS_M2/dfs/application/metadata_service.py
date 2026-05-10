@@ -21,14 +21,6 @@ class MetadataService:
                     "chunks": [...],
                     "distribution": {...}
                 }
-            },
-            "directories": {
-                "<caminho_logico>": {
-                    "path": "...",
-                    "node_id": "...",
-                    "shard_id": ...,
-                    "fallback_used": ...
-                }
             }
         }
     """
@@ -44,9 +36,9 @@ class MetadataService:
 
     # Carrega o índice do arquivo de metadados JSON
     def _load(self) -> dict:
-        # Estrutura padrão garantindo as duas sub-chaves sempre presentes.
+        # Estrutura padrão garantindo a chave 'files' sempre presente.
         # Isso evita ter que checar existência em cada método.
-        default = {"files": {}, "directories": {}}
+        default = {"files": {}}
 
         # Primeira execução: o arquivo de metadados não existe, então retorna um índice vazio
         if not self.metadata_file.exists():
@@ -55,9 +47,13 @@ class MetadataService:
         try:
             # Retorna o conteúdo do arquivo de metadados como um dicionário Python
             data = json.loads(self.metadata_file.read_text(encoding="utf-8"))
-            # Garante compatibilidade caso o arquivo antigo não tenha as chaves.
+            # Garante compatibilidade caso o arquivo antigo não tenha a chave.
             data.setdefault("files", {})
-            data.setdefault("directories", {})
+            
+            # Limpeza caso exista resquício de 'directories' de versões anteriores no JSON salvo
+            if "directories" in data:
+                del data["directories"]
+
             return data
         except Exception:
             return default  # Se o arquivo estiver corrompido ou ilegível, retorna um índice vazio
@@ -121,103 +117,17 @@ class MetadataService:
             # Retorna os caminhos lógicos dos arquivos indexados, ordenados alfabeticamente
             return sorted(self._index["files"].keys())
 
-    # DIRETÓRIOS
-
-    def put_directory(
-        self,
-        path: str,
-        node_id: str,
-        shard_id: int,
-        fallback_used: bool = False,
-    ) -> None:
-        """
-        Registra um diretório lógico no índice
-
-        O FileService chama este método para criar um diretório lógico apontando para um shard específico do nó
-        """
-        with self._lock:
-            self._index["directories"][path] = {
-                "path": path,
-                "node_id": node_id,
-                "shard_id": shard_id,
-                "fallback_used": fallback_used,
-            }
-            self._save()
-
-    def exists_directory(self, path: str) -> bool:
-        with self._lock:
-            return path in self._index["directories"]
-
-    # Verifica se um arquivo já existe no índice
-    # Pode ser usado para evitar sobrescrita ou confirmar existência
-    # def exists(self, path: str) -> bool:
-    #     with self._lock:
-    #         return path in self._index
-    def list_directories(self) -> list[str]:
-        """
-        Lista todos os diretórios lógicos registrados.
-        """
-
-        with self._lock:
-            return sorted(self._index["directories"].keys())
-
-    def directory_is_empty(self, path: str) -> bool:
-        """
-        Verifica se um diretório lógico está vazio.
-
-        Um diretório NÃO está vazio se:
-        - possuir arquivos;
-        - possuir subdiretórios.
-        """
-
-        normalized = path.rstrip("/")
-
-        with self._lock:
-
-            # Verifica arquivos
-            for file_path in self._index["files"]:
-                if file_path.startswith(f"{normalized}/"):
-                    return False
-
-            # Verifica subdiretórios
-            for dir_path in self._index["directories"]:
-                if dir_path == normalized:
-                    continue
-
-                if dir_path.startswith(f"{normalized}/"):
-                    return False
-
-        return True
-
-    def delete_directory(self, path: str) -> None:
-        """
-        Remove um diretório lógico do metadata.
-        """
-
-        with self._lock:
-
-            self._index["directories"].pop(path, None)
-            self._save()
-
     # LISTAGEM UNIFICADA (usada pela CLI)
 
     def list_entries(self) -> list[str]:
         """
-        Retorna uma visão unificada de arquivos e diretórios
+        Retorna uma visão unificada dos arquivos
 
         Esse formato é usado pela CLI no comando LIST
         """
 
         with self._lock:
             entries: list[str] = []
-
-            # DIRETÓRIOS
-
-            for path in sorted(self._index["directories"].keys()):
-                info = self._index["directories"][path]
-                node_id = info.get("node_id", "-")
-                shard_id = info.get("shard_id", "-")
-                entries.append(f"[DIR ] {path}  (node={node_id}, shard={shard_id})")
 
             # ARQUIVOS
 

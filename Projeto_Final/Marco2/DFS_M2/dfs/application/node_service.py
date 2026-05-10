@@ -34,8 +34,6 @@ class NodeService:
     - salvar chunks;
     - recuperar chunks;
     - remover chunks;
-    - criar diretórios físicos;
-    - remover diretórios físicos;
     - listar conteúdo físico do nó.
     """
 
@@ -142,45 +140,6 @@ class NodeService:
                 return make_response(
                     True,
                     "Arquivo removido com sucesso",
-                    node_id=self.node_id,
-                    shard_id=self.shard_id,
-                )
-
-            # ====================================================
-            # MKDIR
-            # ====================================================
-
-            if op == "MKDIR":
-                """
-                Cria um diretório físico local.
-                """
-
-                self.storage.mkdir(request.path)
-
-                return make_response(
-                    True,
-                    "Diretório criado com sucesso",
-                    node_id=self.node_id,
-                    shard_id=self.shard_id,
-                )
-
-            # ====================================================
-            # RMDIR
-            # ====================================================
-
-            if op == "RMDIR":
-                """
-                Remove um diretório físico local.
-
-                IMPORTANTE:
-                Apenas diretórios vazios podem ser removidos.
-                """
-
-                self.storage.rmdir(request.path)
-
-                return make_response(
-                    True,
-                    "Diretório removido com sucesso",
                     node_id=self.node_id,
                     shard_id=self.shard_id,
                 )

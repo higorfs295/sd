@@ -11,10 +11,9 @@ No **Marco 2**, o sistema deixa de operar como um armazenamento centralizado e p
 - coordenador responsável por rotear requisições;
 - comunicação entre processos independentes;
 - armazenamento local isolado por nó;
-- metadados persistentes com visão lógica e física do sistema;
-- suporte a diretórios lógicos no namespace distribuído.
+- metadados persistentes com visão lógica e física do sistema.
 
-A meta deste marco é demonstrar que o sistema consegue distribuir os arquivos corretamente entre os nós, manter a execução organizada, expor melhor a distribuição real dos chunks e preparar a base para os próximos marcos, como replicação, consistência, tolerância a falhas e reequilíbrio. :contentReference[oaicite:1]{index=1}
+A meta deste marco é demonstrar que o sistema consegue distribuir os arquivos corretamente entre os nós, manter a execução organizada, expor melhor a distribuição real dos chunks e preparar a base para os próximos marcos, como replicação, consistência, tolerância a falhas e reequilíbrio.
 
 ---
 
@@ -24,14 +23,11 @@ O DFS foi organizado em camadas, de forma a separar bem responsabilidades e faci
 
 ### Camadas principais
 
-- **Cliente (CLI)**  
-  Responsável por interpretar os comandos do usuário e enviar as requisições ao sistema.
+- **Cliente (CLI)** Responsável por interpretar os comandos do usuário e enviar as requisições ao sistema.
 
-- **Coordenador**  
-  Recebe as requisições da CLI, calcula o shard do arquivo ou diretório e encaminha a operação para o nó correto.
+- **Coordenador** Recebe as requisições da CLI, calcula o shard do arquivo e encaminha a operação para o nó correto.
 
-- **Nós de armazenamento**  
-  Cada nó mantém seu próprio armazenamento local e executa as operações de forma independente.
+- **Nós de armazenamento** Cada nó mantém seu próprio armazenamento local e executa as operações de forma independente.
 
 ### Fluxo principal
 
@@ -40,38 +36,34 @@ O DFS foi organizado em camadas, de forma a separar bem responsabilidades e faci
 ### Visão dos componentes
 
 - o **CLI** conversa com o coordenador;
-- o **coordenador** decide onde cada arquivo ou diretório deve ficar;
+- o **coordenador** decide onde cada arquivo deve ficar;
 - o **shard manager** define a regra de distribuição;
 - o **node registry** mantém os nós cadastrados;
 - o **node client** faz a comunicação interna entre coordenador e nós;
 - o **node service** executa as operações dentro de cada nó;
-- o **local storage** grava, lê, remove e lista arquivos e diretórios no disco;
+- o **local storage** grava, lê, remove e lista arquivos no disco;
 - o **protocol** traduz objetos Python em bytes Protobuf e vice-versa;
 - o **frame** garante que as mensagens TCP sejam lidas corretamente;
-- o **metadata service** mantém o índice lógico de arquivos e diretórios;
-- o **cliente persistente** evita abrir e fechar socket a cada comando dentro da sessão. :contentReference[oaicite:2]{index=2}
+- o **metadata service** mantém o índice lógico de arquivos;
+- o **cliente persistente** evita abrir e fechar socket a cada comando dentro da sessão.
 
 ---
 
 ## ⚙️ Funcionalidades
 
-O sistema suporta as operações básicas esperadas de um DFS e também comandos de gerenciamento de namespace:
+O sistema suporta as operações básicas esperadas de um DFS:
 
 - **PUT**: envia um arquivo local para o DFS;
 - **GET**: recupera um arquivo do DFS para a máquina local;
 - **RM**: remove um arquivo do DFS;
-- **LIST**: lista as entradas conhecidas pelo índice;
-- **MKDIR**: cria um diretório lógico no DFS;
-- **RMDIR**: remove um diretório lógico vazio do DFS.
+- **LIST**: lista as entradas conhecidas pelo índice.
 
 ### Comportamento das operações
 
 - **PUT**: o coordenador divide o arquivo em chunks, calcula o shard de cada chunk, tenta enviar ao nó primário e usa fallback caso necessário, registrando tudo em metadados;
 - **GET**: o coordenador consulta o índice de metadados, localiza os chunks e reconstrói o arquivo original;
 - **RM**: o arquivo é removido em todos os nós onde seus chunks estão armazenados e, se tudo der certo, o metadado é removido;
-- **LIST**: o coordenador lê o índice lógico e retorna arquivos e diretórios conhecidos;
-- **MKDIR**: o coordenador cria e registra um diretório lógico, com persistência no metadata e criação física no nó responsável;
-- **RMDIR**: o coordenador remove diretórios vazios, validando primeiro o namespace lógico. :contentReference[oaicite:3]{index=3}
+- **LIST**: o coordenador lê o índice lógico e retorna os arquivos conhecidos.
 
 ---
 
@@ -87,7 +79,7 @@ Isso garante que:
 - o mesmo caminho e chunk sempre gerem a mesma decisão base;
 - a distribuição seja determinística;
 - o balanceamento inicial seja simples e previsível;
-- a separação dos chunks entre nós fique mais explícita nos logs e nos metadados. :contentReference[oaicite:4]{index=4}
+- a separação dos chunks entre nós fique mais explícita nos logs e nos metadados.
 
 ### Node ID
 
@@ -114,7 +106,7 @@ O Protobuf é usado apenas como formato de serialização das mensagens.
 
 ### Framing
 
-Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por tamanho para garantir que cada mensagem seja lida corretamente e sem mistura com outras. :contentReference[oaicite:5]{index=5}
+Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por tamanho para garantir que cada mensagem seja lida corretamente e sem mistura com outras.
 
 ---
 
@@ -186,91 +178,68 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
 
 ### Raiz da pasta `MARCO2/`
 
-- **run_cluster.py**  
-  Script lançador que sobe automaticamente os três nós e o coordenador.
+- **run_cluster.py** Script lançador que sobe automaticamente os três nós e o coordenador.
 
-- **run_cli.py**  
-  Script lançador da CLI. Ele permite usar os comandos do DFS sem precisar entrar manualmente na pasta `DFS_M2`.
+- **run_cli.py** Script lançador da CLI. Ele permite usar os comandos do DFS sem precisar entrar manualmente na pasta `DFS_M2`.
 
 ### Pasta `DFS_M2/src/dfs/`
 
-- **`__main__.py`**  
-  Ponto de entrada do pacote. Permite rodar a CLI com `python -m dfs`.
+- **`__main__.py`** Ponto de entrada do pacote. Permite rodar a CLI com `python -m dfs`.
 
-- **`config.py`**  
-  Centraliza portas, hosts, caminhos e a configuração dos nós do cluster.
+- **`config.py`** Centraliza portas, hosts, caminhos e a configuração dos nós do cluster.
 
-- **`frame.py`**  
-  Implementa o framing das mensagens TCP por tamanho.
+- **`frame.py`** Implementa o framing das mensagens TCP por tamanho.
 
-- **`protocol.py`**  
-  Traduz as mensagens Protobuf entre bytes e objetos Python.
+- **`protocol.py`** Traduz as mensagens Protobuf entre bytes e objetos Python.
 
-- **`client.py`**  
-  Cliente TCP persistente usado pela CLI para falar com o coordenador.
+- **`client.py`** Cliente TCP persistente usado pela CLI para falar com o coordenador.
 
 ### Pasta `interface/`
 
-- **`cli.py`**  
-  Interface de linha de comando. Interpreta `put`, `get`, `rm`, `list`, `mkdir` e `rmdir`.  
+- **`cli.py`** Interface de linha de comando. Interpreta `put`, `get`, `rm` e `list`.  
   Também oferece modo interativo com menu de uso.
 
-- **`server.py`**  
-  Coordenador principal do DFS. Recebe as requisições da CLI e roteia para o nó correto.
+- **`server.py`** Coordenador principal do DFS. Recebe as requisições da CLI e roteia para o nó correto.
 
-- **`storage_node.py`**  
-  Servidor de um nó de armazenamento individual. Cada instância escuta em uma porta própria.
+- **`storage_node.py`** Servidor de um nó de armazenamento individual. Cada instância escuta em uma porta própria.
 
 ### Pasta `application/`
 
-- **`file_service.py`**  
-  Camada de serviço do coordenador. Decide o destino da operação, faz o encaminhamento e lida com distribuição por chunks, fallback e metadados.
+- **`file_service.py`** Camada de serviço do coordenador. Decide o destino da operação, faz o encaminhamento e lida com distribuição por chunks, fallback e metadados.
 
-- **`metadata_service.py`**  
-  Serviço de índice lógico do DFS. Mantém arquivos, chunks e diretórios persistidos em JSON.
+- **`metadata_service.py`** Serviço de índice lógico do DFS. Mantém arquivos e chunks persistidos em JSON.
 
-- **`node_service.py`**  
-  Camada de serviço que roda dentro de cada nó e executa as operações localmente.
+- **`node_service.py`** Camada de serviço que roda dentro de cada nó e executa as operações localmente.
 
 ### Pasta `cluster/`
 
-- **`node_registry.py`**  
-  Mantém a lista de nós disponíveis, seus hosts, portas e diretórios.
+- **`node_registry.py`** Mantém a lista de nós disponíveis, seus hosts, portas e diretórios.
 
-- **`shard_manager.py`**  
-  Calcula o shard responsável por cada caminho lógico e por cada chunk, além de fornecer ordem de fallback.
+- **`shard_manager.py`** Calcula o shard responsável por cada caminho lógico e por cada chunk, além de fornecer ordem de fallback.
 
-- **`node_client.py`**  
-  Cliente interno que o coordenador usa para se comunicar com um nó.
+- **`node_client.py`** Cliente interno que o coordenador usa para se comunicar com um nó.
 
 ### Pasta `storage/`
 
-- **`local_storage.py`**  
-  Implementa o armazenamento local do nó: salvar, ler, apagar, criar e remover diretórios, além de listar arquivos.
+- **`local_storage.py`** Implementa o armazenamento local do nó: salvar, ler, apagar e listar arquivos.
 
 ### Pasta `pb/`
 
-- **`dfs_pb2.py`**  
-  Arquivo gerado automaticamente pelo Protobuf a partir de `dfs.proto`.
+- **`dfs_pb2.py`** Arquivo gerado automaticamente pelo Protobuf a partir de `dfs.proto`.
 
 ### Pasta `proto/`
 
-- **`dfs.proto`**  
-  Define a estrutura das mensagens `FileRequest` e `FileResponse`.
+- **`dfs.proto`** Define a estrutura das mensagens `FileRequest` e `FileResponse`.
 
 ### Pasta `scripts/`
 
-- **`start_coordinator.py`**  
-  Script auxiliar para subir o coordenador.
+- **`start_coordinator.py`** Script auxiliar para subir o coordenador.
 
-- **`start_node1.py`**  
-  Script auxiliar para subir o nó 1.
+- **`start_node1.py`** Script auxiliar para subir o nó 1.
 
-- **`start_node2.py`**  
-  Script auxiliar para subir o nó 2.
+- **`start_node2.py`** Script auxiliar para subir o nó 2.
 
-- **`start_node3.py`**  
-  Script auxiliar para subir o nó 3.
+- **`start_node3.py`** Script auxiliar para subir o nó 3.
 
 ---
 
@@ -296,7 +265,7 @@ Na pasta `MARCO2/`:
 
     .venv\Scripts\activate
 
-#### Windows com Git Bash
+#### VSCODE(Windows) com Git Bash
 
     source .venv/Scripts/activate
 
@@ -359,11 +328,9 @@ Em outro terminal, com a venv ativada:
 Exemplos:
 
     python run_cli.py list
-    python run_cli.py mkdir docs
     python run_cli.py put DFS_M2/teste.txt docs/teste.txt
     python run_cli.py get docs/teste.txt copia.txt
     python run_cli.py rm docs/teste.txt
-    python run_cli.py rmdir docs
 
 Também é possível executar a CLI em modo interativo:
 
@@ -395,14 +362,6 @@ Nesse modo, a interface exibe o menu de uso e mantém uma conexão persistente c
 
     python run_cli.py rm docs/teste.txt
 
-### Criar diretório
-
-    python run_cli.py mkdir docs
-
-### Remover diretório vazio
-
-    python run_cli.py rmdir docs
-
 ### Abrir modo interativo
 
     python run_cli.py
@@ -427,14 +386,6 @@ Nesse modo, a interface exibe o menu de uso e mantém uma conexão persistente c
 
     Coordenador consulta o índice de metadados → consolida as respostas → retorna a listagem lógica
 
-### MKDIR
-
-    CLI → Coordenador → Nó responsável → Criação do diretório físico e registro no metadata
-
-### RMDIR
-
-    CLI → Coordenador → Nó responsável → Remoção do diretório físico e atualização do metadata
-
 ---
 
 ## 🛠️ Decisões de Projeto
@@ -447,9 +398,8 @@ Nesse modo, a interface exibe o menu de uso e mantém uma conexão persistente c
 - roteamento centralizado pelo coordenador;
 - execução independente dos nós de armazenamento;
 - cliente persistente durante a sessão interativa;
-- suporte a diretórios lógicos no namespace do DFS;
 - logs por chunk para facilitar auditoria da distribuição;
-- fallback determinístico de nós em caso de falha de envio. :contentReference[oaicite:6]{index=6}
+- fallback determinístico de nós em caso de falha de envio.
 
 ---
 
@@ -460,10 +410,9 @@ Nesse modo, a interface exibe o menu de uso e mantém uma conexão persistente c
 - balanceamento inicial simples;
 - comunicação entre nós via socket;
 - estrutura pronta para expansão futura;
-- namespace lógico com diretórios;
 - melhor rastreabilidade da distribuição por chunk;
 - cliente com uso persistente em modo interativo;
-- capacidade de fallback entre nós. :contentReference[oaicite:7]{index=7}
+- capacidade de fallback entre nós.
 
 ---
 
@@ -475,7 +424,6 @@ Nesse modo, a interface exibe o menu de uso e mantém uma conexão persistente c
 - diretórios dos nós inexistentes;
 - usar comandos da CLI sem o formato correto;
 - executar o `put` com caminho local inexistente;
-- tentar remover diretório não vazio com `rmdir`;
 - usar metadados antigos incompatíveis com o novo formato de índice.
 
 ---
@@ -506,12 +454,10 @@ O projeto está preparado para evoluir para os próximos marcos:
 - o coordenador consolida as respostas quando necessário;
 - o caminho local do arquivo deve existir antes do envio;
 - o caminho lógico informado no DFS pode ser diferente do caminho do arquivo na máquina local;
-- a listagem lógica agora inclui arquivos e diretórios;
 - o modo interativo da CLI mantém a conexão viva até o usuário sair.
 
 ---
 
 ## 👨‍💻 Autor
 
-**Higor Ferreira Silva**  
-**Matrícula: 202201635**
+**Higor Ferreira Silva & Vitória Mendonça** **Matrícula: 202201635 & 202004699**
