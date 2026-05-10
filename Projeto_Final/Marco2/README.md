@@ -62,7 +62,7 @@ O sistema suporta as operações básicas esperadas de um DFS:
 
 - **PUT**: o coordenador divide o arquivo em chunks, calcula o shard de cada chunk, tenta enviar ao nó primário e usa fallback caso necessário, registrando tudo em metadados;
 - **GET**: o coordenador consulta o índice de metadados, localiza os chunks e reconstrói o arquivo original;
-- **RM**: o arquivo é removido em todos os nós onde seus chunks estão armazenados e, se tudo der certo, o metadado é removido;
+- **RM**: o arquivo é removido em todos os nós onde seus chunks estão armazenados (com limpeza automática de pastas vazias no disco) e, se tudo der certo, o metadado é removido;
 - **LIST**: o coordenador lê o índice lógico e retorna os arquivos conhecidos.
 
 ---
@@ -115,62 +115,53 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
     MARCO2/
     ├── .venv/
     ├── DFS_M2/
-    │   ├── src/
-    │   │   └── dfs/
-    │   │       ├── __init__.py
-    │   │       ├── __main__.py
-    │   │       ├── config.py
-    │   │       ├── frame.py
-    │   │       ├── protocol.py
-    │   │       ├── client.py
-    │   │       │
-    │   │       ├── interface/
-    │   │       │   ├── __init__.py
-    │   │       │   ├── cli.py
-    │   │       │   ├── server.py
-    │   │       │   └── storage_node.py
-    │   │       │
-    │   │       ├── application/
-    │   │       │   ├── __init__.py
-    │   │       │   ├── file_service.py
-    │   │       │   ├── metadata_service.py
-    │   │       │   └── node_service.py
-    │   │       │
-    │   │       ├── cluster/
-    │   │       │   ├── __init__.py
-    │   │       │   ├── node_registry.py
-    │   │       │   ├── node_client.py
-    │   │       │   └── shard_manager.py
-    │   │       │
-    │   │       ├── storage/
-    │   │       │   ├── __init__.py
-    │   │       │   └── local_storage.py
-    │   │       │
-    │   │       └── pb/
-    │   │           ├── __init__.py
-    │   │           └── dfs_pb2.py
-    │   │
-    │   ├── proto/
-    │   │   └── dfs.proto
+    │   ├── pyproject.toml
+    │   ├── requirements.txt
     │   │
     │   ├── data/
+    │   │   ├── metadata/
+    │   │   │   └── metadata_index.json
     │   │   └── nodes/
     │   │       ├── node1/
     │   │       ├── node2/
     │   │       └── node3/
     │   │
-    │   ├── scripts/
-    │   │   ├── start_coordinator.py
-    │   │   ├── start_node1.py
-    │   │   ├── start_node2.py
-    │   │   └── start_node3.py
+    │   ├── dfs/
+    │   │   ├── __init__.py
+    │   │   ├── __main__.py
+    │   │   ├── config.py
+    │   │   ├── frame.py
+    │   │   ├── protocol.py
+    │   │   ├── client.py
+    │   │   │
+    │   │   ├── application/
+    │   │   │   ├── file_service.py
+    │   │   │   ├── metadata_service.py
+    │   │   │   └── node_service.py
+    │   │   │
+    │   │   ├── cluster/
+    │   │   │   ├── node_client.py
+    │   │   │   ├── node_registry.py
+    │   │   │   └── sharding.py
+    │   │   │
+    │   │   ├── interface/
+    │   │   │   ├── cli.py
+    │   │   │   ├── server.py
+    │   │   │   └── storage_node.py
+    │   │   │
+    │   │   ├── storage/
+    │   │   │   └── local_storage.py
+    │   │   │
+    │   │   └── pb/
+    │   │       ├── dfs_pb2.py
+    │   │       └── protocol.py
     │   │
-    │   ├── requirements.txt
-    │   └── README.md
+    │   └── proto/
+    │       └── dfs.proto
     │
+    ├── README.md
     ├── run_cluster.py
-    ├── run_cli.py
-    └── teste.txt
+    └── run_cli.py
 
 ---
 
@@ -182,7 +173,7 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
 
 - **run_cli.py** Script lançador da CLI. Ele permite usar os comandos do DFS sem precisar entrar manualmente na pasta `DFS_M2`.
 
-### Pasta `DFS_M2/src/dfs/`
+### Pasta `DFS_M2/dfs/`
 
 - **`__main__.py`** Ponto de entrada do pacote. Permite rodar a CLI com `python -m dfs`.
 
@@ -215,31 +206,23 @@ Como o TCP trabalha como fluxo contínuo de bytes, o projeto utiliza framing por
 
 - **`node_registry.py`** Mantém a lista de nós disponíveis, seus hosts, portas e diretórios.
 
-- **`shard_manager.py`** Calcula o shard responsável por cada caminho lógico e por cada chunk, além de fornecer ordem de fallback.
+- **`sharding.py`** Calcula o shard responsável por cada caminho lógico e por cada chunk, além de fornecer ordem de fallback.
 
 - **`node_client.py`** Cliente interno que o coordenador usa para se comunicar com um nó.
 
 ### Pasta `storage/`
 
-- **`local_storage.py`** Implementa o armazenamento local do nó: salvar, ler, apagar e listar arquivos.
+- **`local_storage.py`** Implementa o armazenamento local do nó: salvar, ler, apagar (com limpeza de diretórios vazios) e listar arquivos.
 
 ### Pasta `pb/`
 
 - **`dfs_pb2.py`** Arquivo gerado automaticamente pelo Protobuf a partir de `dfs.proto`.
 
+- **`protocol.py`** Tradutor de requisições e respostas do formato Protobuf.
+
 ### Pasta `proto/`
 
 - **`dfs.proto`** Define a estrutura das mensagens `FileRequest` e `FileResponse`.
-
-### Pasta `scripts/`
-
-- **`start_coordinator.py`** Script auxiliar para subir o coordenador.
-
-- **`start_node1.py`** Script auxiliar para subir o nó 1.
-
-- **`start_node2.py`** Script auxiliar para subir o nó 2.
-
-- **`start_node3.py`** Script auxiliar para subir o nó 3.
 
 ---
 
@@ -284,7 +267,7 @@ Com a venv ativada:
 Sempre que o arquivo `DFS_M2/proto/dfs.proto` for alterado, regenere o código Python:
 
     cd DFS_M2
-    python -m grpc_tools.protoc -I=proto --python_out=src proto/dfs.proto
+    python -m grpc_tools.protoc -I=proto --python_out=. proto/dfs.proto
 
 Depois volte para a pasta `MARCO2/` se necessário:
 
@@ -296,9 +279,9 @@ Depois volte para a pasta `MARCO2/` se necessário:
 
 Se ainda não existirem:
 
-    mkdir DFS_M2/data/nodes/node1
-    mkdir DFS_M2/data/nodes/node2
-    mkdir DFS_M2/data/nodes/node3
+    mkdir -p DFS_M2/data/nodes/node1
+    mkdir -p DFS_M2/data/nodes/node2
+    mkdir -p DFS_M2/data/nodes/node3
 
 ---
 
@@ -380,7 +363,7 @@ Nesse modo, a interface exibe o menu de uso e mantém uma conexão persistente c
 
 ### RM
 
-    CLI → Coordenador → Nó responsável → Remoção local
+    CLI → Coordenador → Nó responsável → Remoção local com limpeza de pastas
 
 ### LIST
 
@@ -397,6 +380,7 @@ Nesse modo, a interface exibe o menu de uso e mantém uma conexão persistente c
 - distribuição determinística dos arquivos por hash;
 - roteamento centralizado pelo coordenador;
 - execução independente dos nós de armazenamento;
+- remoção de diretórios `.chunks` vazios para otimização do disco;
 - cliente persistente durante a sessão interativa;
 - logs por chunk para facilitar auditoria da distribuição;
 - fallback determinístico de nós em caso de falha de envio.
@@ -455,7 +439,7 @@ O projeto está preparado para evoluir para os próximos marcos:
 - o caminho local do arquivo deve existir antes do envio;
 - o caminho lógico informado no DFS pode ser diferente do caminho do arquivo na máquina local;
 - o modo interativo da CLI mantém a conexão viva até o usuário sair.
-
+ 
 ---
 
 ## 👨‍💻 Autor
