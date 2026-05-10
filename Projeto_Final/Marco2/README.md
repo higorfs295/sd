@@ -252,7 +252,7 @@ A execução foi pensada para ser feita a partir da pasta `MARCO2/`.
 Na pasta `MARCO2/`:
 
     python -m venv .venv
-
+ 
 ---
 
 ### 2. Ativar o ambiente virtual
