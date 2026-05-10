@@ -2,7 +2,7 @@
 DESCRIÇÃO GERAL:
 Interface de linha de comando do DFS.
 
-Este módulo agora oferece dois modos de uso:
+Este módulo oferece dois modos de uso:
 1) modo direto, com comandos únicos:
    python run_cli.py put origem.txt docs/origem.txt
 
@@ -83,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
+
 def print_menu() -> None:
     """
     Exibe o menu principal do DFS em formato tabular.
@@ -93,21 +94,21 @@ def print_menu() -> None:
     """
 
     commands = [
-        ("put <origem> <dfs_path>", "Envia arquivo ao DFS"),
-        ("get <dfs_path> [saida]", "Baixa arquivo do DFS"),
-        ("rm <dfs_path>", "Remove arquivo"),
-        ("list", "Lista entradas"),
-        ("mkdir <dfs_path>", "Cria diretório"),
-        ("rmdir <dfs_path>", "Remove diretório vazio"),
-        ("exit | quit", "Encerra sessão"),
+        ("put <file> <dfs_path>", "Envia arquivo ao DFS."),
+        ("get <dfs_path> [local_file]", "Baixa arquivo do DFS."),
+        ("rm <dfs_path>", "Remove arquivo do DFS."),
+        ("list", "Lista entradas no DFS."),
+        ("mkdir <dfs_path>", "Cria diretório."),
+        ("rmdir <dfs_path>", "Remove diretório vazio."),
+        ("exit | quit", "Encerra sessão."),
     ]
 
     examples = [
         "put teste.txt docs/teste.txt",
         "get docs/teste.txt copia.txt",
-        "mkdir docs",
-        "list",
         "rm docs/teste.txt",
+        "list",
+        "mkdir docs",
         "rmdir docs",
     ]
 
@@ -118,7 +119,7 @@ def print_menu() -> None:
     print()
 
     print("=" * 110)
-    print("DFS DISTRIBUÍDO - MENU INTERATIVO")
+    print("SISTEMA DE ARQUIVOS DISTRIBUÍDO (DFS) - MENU INTERATIVO")
     print("=" * 110)
 
     # ============================================================
@@ -128,15 +129,9 @@ def print_menu() -> None:
     left_title = "COMANDOS DISPONÍVEIS"
     right_title = "EXEMPLOS"
 
-    print(
-        f"{left_title:<58}"
-        f"{right_title:<50}"
-    )
+    print(f"{left_title:<58}" f"{right_title:<50}")
 
-    print(
-        f"{'-' * 56}  "
-        f"{'-' * 48}"
-    )
+    print(f"{'-' * 56}  " f"{'-' * 48}")
 
     # ============================================================
     # LINHAS
@@ -173,11 +168,10 @@ def print_menu() -> None:
     # ============================================================
 
     print("=" * 110)
-    print(
-        "Modo interativo ativo | conexão persistente com o coordenador"
-    )
+    print("Digite 'help', 'menu' ou '?' para reexibir o menu a qualquer momento.")
     print("=" * 110)
     print()
+
 
 def _run_single_command(client: DFSClient, args: argparse.Namespace) -> None:
     """
@@ -279,6 +273,12 @@ def interactive_menu() -> None:
 
                 try:
                     argv = shlex.split(raw)
+
+                    if (
+                        argv
+                    ):  # Comando é normalizado para minúsculas, mas argumentos (como nomes de arquivos) mantêm case original
+                        argv[0] = argv[0].lower()
+
                     args = parser.parse_args(argv)
                 except SystemExit:
                     # O argparse pode tentar sair quando a entrada é inválida.
