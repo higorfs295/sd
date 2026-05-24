@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package dfs.v1;
+
+// Mensagem enviada do cliente para o coordenador ou para um nó do cluster.
+message FileRequest {
+  string op = 1;      // Operação desejada: PUT, GET, LIST, DELETE
+  string path = 2;    // Caminho lógico do arquivo no DFS
+  bytes data = 3;     // Conteúdo binário do arquivo, quando aplicável
+
+  string node_id = 4; // Identificador do nó associado à operação
+  int32 shard_id = 5; // Identificador do shard responsável pelo arquivo
+}
+
+// Mensagem enviada pelo coordenador ou por um nó ao cliente.
+message FileResponse {
+  bool ok = 1;                  // Indica se a operação deu certo
+  string message = 2;           // Mensagem textual de retorno
+  bytes data = 3;               // Conteúdo retornado em GET
+  repeated string entries = 4;   // Lista de arquivos retornada em LIST
+
+  string node_id = 5;           // Nó que atendeu a requisição
+  int32 shard_id = 6;           // Shard associado à operação
+}
+
+// grpc
+service DFSService {
+    // O Coordenador chama essa função no Nó de Armazenamento
+    // AGORA SIM, USANDO OS NOMES CORRETOS:
+    rpc ProcessChunk (FileRequest) returns (FileResponse);
+}
