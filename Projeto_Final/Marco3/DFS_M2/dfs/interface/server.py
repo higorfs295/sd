@@ -1,87 +1,61 @@
-# /DFS_M2/dfs/interface/server.py
 """
 DESCRIÇÃO GERAL:
-Este módulo representa o coordenador do DFS
+Este módulo representa o coordenador do DFS via gRPC.
 Ele recebe as requisições da CLI, processa o roteamento e encaminha as operações
-para o nó correto do cluster
-Aceita múltiplos clientes simultâneos (uma thread por conexão) e suporta conexões persistentes cada cliente envia várias requisições no mesmo socket
+para o nó correto do cluster usando o FileService.
+O gRPC já trata de múltiplos clientes em paralelo automaticamente.
 """
 
-import socket
-import threading
+import grpc
+from concurrent import futures
 
 from dfs.config import COORDINATOR_HOST, COORDINATOR_PORT
-from dfs.frame import recv_frame, send_frame
 from dfs.application.file_service import FileService
+from dfs.pb import dfs_pb2_grpc
 
 
-def _client(conn, addr, service):
+class CoordinatorServicer(dfs_pb2_grpc.DFSServiceServicer):
     """
-    Atende um cliente do início ao fim em uma thread dedicada
-    Loop interno suporta conexão persistente
+    Ponte entre o Servidor gRPC e a lógica do Coordenador.
     """
-    print(f"[Coordenador] conexão aberta com {addr}")
+    def __init__(self, service: FileService):
+        self.service = service
 
-    # 'with conn' garante que o socket é fechado mesmo se houver exceção
-    with conn:
-        try:
-            # Lê e responde requisições enquanto o cliente mantiver o socket aberto
-            # Quando ele fechar, recv_frame levanta ConnectionError e saímos do loop.
-            while True:
-                raw_request = recv_frame(conn)
-                raw_response = service.dispatch(raw_request)
-                send_frame(conn, raw_response)
-
-        except ConnectionError:
-            # Encerramento normal: cliente fechou o socket
-            # Não é erro, é o caminho esperado de término da conexão
-            pass
-
-        except Exception as exc:
-            # Qualquer outra falha é registrada, mas mantém o coordenador de pé
-            # A thread atual morre, as outras seguem
-            print(f"[Coordenador] erro ao atender {addr}: {exc}")
-
-    print(f"[Coordenador] conexão encerrada com {addr}")
+    def ProcessChunk(self, request, context):
+        """
+        Recebe a requisição (FileRequest) do cliente CLI e passa para o FileService.
+        Retorna o FileResponse gerado pelo FileService.
+        """
+        return self.service.dispatch(request)
 
 
 def main():
     """
-    Inicializa o coordenador TCP do DFS
+    Inicializa o coordenador do DFS usando gRPC.
     """
-    # FileService é compartilhado entre todas as threads
-    # O MetadataService interno já tem lock, então isso é seguro
+    # FileService mantém o estado (metadados, etc.)
     service = FileService()
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        # Permite reutilizar a porta rapidamente entre execuções
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Cria o servidor gRPC com um pool de 50 threads (pode atender 50 clientes simultâneos)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=50))
+    
+    # Acopla a nossa classe servidora ao servidor gRPC
+    dfs_pb2_grpc.add_DFSServiceServicer_to_server(CoordinatorServicer(service), server)
 
-        # Liga o socket ao endereço configurado
-        server.bind((COORDINATOR_HOST, COORDINATOR_PORT))
+    # Liga o socket ao endereço configurado
+    address = f"{COORDINATOR_HOST}:{COORDINATOR_PORT}"
+    server.add_insecure_port(address)
 
-        # Backlog maior porque agora esperamos vários clientes em paralelo
-        server.listen(50)
+    print(f"🚀 Coordenador DFS ouvindo via gRPC em {address}")
+    
+    server.start()
 
-        print(f"Coordenador DFS ouvindo em {COORDINATOR_HOST}:{COORDINATOR_PORT}")
-
-        try:
-            while True:
-                # accept() bloqueia até chegar uma nova conexão
-                conn, addr = server.accept()
-
-                # Cada conexão vai para uma thread dedicada
-                # principal — Ctrl+C encerra tudo limpo.
-                thread = threading.Thread(
-                    target=_client,
-                    args=(conn, addr, service),
-                    daemon=True,  # faz a thread morrer junto com o processo
-                )
-                thread.start()
-
-        # Ctrl+C é capturado para encerrar o servidor de forma limpa
-        except KeyboardInterrupt:
-            print("\nCoordenador encerrado pelo usuário.")
+    try:
+        # Mantém o processo principal vivo
+        server.wait_for_termination()
+    except KeyboardInterrupt:
+        print("\nCoordenador encerrado pelo usuário.")
+        server.stop(0)
 
 
 if __name__ == "__main__":
