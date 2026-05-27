@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from dfs.pb import dfs_pb2 as dfs_dot_pb_dot_dfs__pb2
+import dfs_pb2 as dfs__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in dfs/pb/dfs_pb2_grpc.py depends on'
+        + ' but the generated code in dfs_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -26,7 +26,8 @@ if _version_not_supported:
 
 
 class DFSServiceStub(object):
-    """grpc
+    """============== SERVIÇOS ==============
+    grpc
     """
 
     def __init__(self, channel):
@@ -37,18 +38,35 @@ class DFSServiceStub(object):
         """
         self.ProcessChunk = channel.unary_unary(
                 '/dfs.v1.DFSService/ProcessChunk',
-                request_serializer=dfs_dot_pb_dot_dfs__pb2.FileRequest.SerializeToString,
-                response_deserializer=dfs_dot_pb_dot_dfs__pb2.FileResponse.FromString,
+                request_serializer=dfs__pb2.FileRequest.SerializeToString,
+                response_deserializer=dfs__pb2.FileResponse.FromString,
+                _registered_method=True)
+        self.GetFileMap = channel.unary_unary(
+                '/dfs.v1.DFSService/GetFileMap',
+                request_serializer=dfs__pb2.GetMapRequest.SerializeToString,
+                response_deserializer=dfs__pb2.FileMap.FromString,
                 _registered_method=True)
 
 
 class DFSServiceServicer(object):
-    """grpc
+    """============== SERVIÇOS ==============
+    grpc
     """
 
     def ProcessChunk(self, request, context):
-        """O Coordenador chama essa função no Nó de Armazenamento
-        AGORA SIM, USANDO OS NOMES CORRETOS:
+        """Coordenador implementa: roteia para os nós corretos
+        Nó implementa: executa no disco local
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetFileMap(self, request, context):
+        """Permite ao cliente descobrir onde estão os chunks de um arquivo sem que os bytes precisem passar pelo coordenador
+        Fluxo completo do GET refatorado:
+        Cliente -> GetFileMap -> Coordenador devolve FileMap
+        Cliente -> ProcessChunk(op=GET) -> Nó (em paralelo, para cada chunk)
+        Cliente remonta localmente
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -59,8 +77,13 @@ def add_DFSServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'ProcessChunk': grpc.unary_unary_rpc_method_handler(
                     servicer.ProcessChunk,
-                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.FileRequest.FromString,
-                    response_serializer=dfs_dot_pb_dot_dfs__pb2.FileResponse.SerializeToString,
+                    request_deserializer=dfs__pb2.FileRequest.FromString,
+                    response_serializer=dfs__pb2.FileResponse.SerializeToString,
+            ),
+            'GetFileMap': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetFileMap,
+                    request_deserializer=dfs__pb2.GetMapRequest.FromString,
+                    response_serializer=dfs__pb2.FileMap.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -71,7 +94,8 @@ def add_DFSServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class DFSService(object):
-    """grpc
+    """============== SERVIÇOS ==============
+    grpc
     """
 
     @staticmethod
@@ -89,8 +113,35 @@ class DFSService(object):
             request,
             target,
             '/dfs.v1.DFSService/ProcessChunk',
-            dfs_dot_pb_dot_dfs__pb2.FileRequest.SerializeToString,
-            dfs_dot_pb_dot_dfs__pb2.FileResponse.FromString,
+            dfs__pb2.FileRequest.SerializeToString,
+            dfs__pb2.FileResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetFileMap(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.DFSService/GetFileMap',
+            dfs__pb2.GetMapRequest.SerializeToString,
+            dfs__pb2.FileMap.FromString,
             options,
             channel_credentials,
             insecure,
