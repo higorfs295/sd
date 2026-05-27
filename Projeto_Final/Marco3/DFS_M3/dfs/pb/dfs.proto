@@ -1,31 +1,77 @@
 syntax = "proto3";
-
 package dfs.v1;
 
+// ============== METADADOS ==============
+
+// Descreve UM chunk específico e onde ele vive no cluster
+// É a unidade básica do "mapa do arquivo" que o coordenador devolve quando o cliente pergunta "onde estão os pedaços de docs/teste.txt?"
+message ChunkLocation {
+  int32 chunk_id = 1;
+  int64 size = 2; // Tamanho em bytes do conteúdo deste chunk
+  repeated ReplicaInfo replicas = 3; // Lista de TODAS as réplicas onde este chunk está armazenado
+}
+
+// Descreve UMA réplica específica de um chunk: onde encontrá-la na rede e qual é o caminho físico dela no disco do nó
+// É essa estrutura que permite o cliente se conectar DIRETAMENTE aos nós, sem passar pelo coordenador (resolve o gargalo no coordenador)
+message ReplicaInfo {
+  string node_id = 1;
+  string host = 2; // Endereço de rede do nó, é o que o cliente usa para abrir o canal gRPC
+  int32 port = 3; // Porta gRPC onde o nó está escutando
+  string chunk_path = 4; // Caminho INTERNO do chunk dentro do disco do nó
+}
+
+// O mapa completo do arquivo: tudo que o cliente precisa saber para baixar o arquivo direto dos nós, sem passar bytes pelo coordenador
+message FileMap {
+  string path = 1; // Caminho lógico do arquivo no DFS
+  int64 total_size = 2; // Usado para validação final, depois de remontar, o cliente confere se o arquivo gerado tem o mesmo tamanho que o esperado
+  int64 version = 3; // Versão atual do arquivo para consistência
+  repeated ChunkLocation chunks = 4; // Lista completa dos chunks do arquivo
+}
+
+// ============== REQUESTS/RESPONSES ==============
 // Mensagem enviada do cliente para o coordenador ou para um nó do cluster.
 message FileRequest {
-  string op = 1;      // Operação desejada: PUT, GET, LIST, DELETE
-  string path = 2;    // Caminho lógico do arquivo no DFS
-  bytes data = 3;     // Conteúdo binário do arquivo, quando aplicável
+  string op = 1; // Operação desejada: PUT, GET, LIST, DELETE
+  string path = 2; // Caminho lógico do arquivo no DFS
+  bytes data = 3; // Conteúdo binário do arquivo, quando aplicável
 
   string node_id = 4; // Identificador do nó associado à operação
   int32 shard_id = 5; // Identificador do shard responsável pelo arquivo
+
+  int64 version = 6; // Versão lógica do arquivo no momento desta escrita e incrementado a cada PUT
+  int64 timestamp = 7; // Timestamp em nanosegundoso momento da escrita e serve como tie-breaker se duas escritas tiverem a mesma versão
 }
 
 // Mensagem enviada pelo coordenador ou por um nó ao cliente.
 message FileResponse {
-  bool ok = 1;                  // Indica se a operação deu certo
-  string message = 2;           // Mensagem textual de retorno
-  bytes data = 3;               // Conteúdo retornado em GET
-  repeated string entries = 4;   // Lista de arquivos retornada em LIST
+  bool ok = 1; // Indica se a operação deu certo
+  string message = 2; // Mensagem textual de retorno
+  bytes data = 3; // Conteúdo retornado em GET
+  repeated string entries = 4; // Lista de arquivos retornada em LIST
 
-  string node_id = 5;           // Nó que atendeu a requisição
-  int32 shard_id = 6;           // Shard associado à operação
+  string node_id = 5;  // Nó que atendeu a requisição
+  int32 shard_id = 6; // Shard associado à operação
+
+  int64 version = 7; // Versão do chunk que a réplica devolveu
+  int64 timestamp = 8; // Timestamp gravado junto com o chunk na hora da escrita
 }
 
+// Pedido enxuto usado APENAS pelo novo fluxo do GET, com o coordenador indicando onde cada chunk está, e o cliente assume daqui em diante
+message GetMapRequest {
+  string path = 1;
+}
+
+// ============== SERVIÇOS ==============
 // grpc
 service DFSService {
-    // O Coordenador chama essa função no Nó de Armazenamento
-    // AGORA SIM, USANDO OS NOMES CORRETOS:
+    // Coordenador implementa: roteia para os nós corretos
+    // Nó implementa: executa no disco local
     rpc ProcessChunk (FileRequest) returns (FileResponse);
+
+    // Permite ao cliente descobrir onde estão os chunks de um arquivo sem que os bytes precisem passar pelo coordenador
+    // Fluxo completo do GET refatorado:
+    //   Cliente -> GetFileMap -> Coordenador devolve FileMap
+    //   Cliente -> ProcessChunk(op=GET) -> Nó (em paralelo, para cada chunk)
+    //   Cliente remonta localmente
+    rpc GetFileMap (GetMapRequest) returns (FileMap);
 }
