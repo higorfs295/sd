@@ -399,10 +399,10 @@ pip install -r DFS_M3/requirements.txt
 ```
 
 ### Step 4: Compilação Manual do Contrato IDL (Protobuf / gRPC)
-Sempre que o arquivo de especificação de interfaces de rede `DFS_M3/proto/dfs.proto` sofrer qualquer tipo de modificação de atributos ou adição de assinaturas RPC, mude temporariamente o escopo de diretório e invoque a ferramenta do compilador nativo para atualizar o pacote interno de stubs `pb/`:
+Sempre que o arquivo de especificação de interfaces de rede `DFS_M3/dfs/pb/dfs.proto` sofrer qualquer tipo de modificação de atributos ou adição de assinaturas RPC, mude temporariamente o escopo de diretório e invoque a ferramenta do compilador nativo para atualizar o pacote interno de stubs `pb/`:
 ```bash
 cd DFS_M3
-python -m grpc_tools.protoc -I=proto --python_out=./dfs/pb --grpc_python_out=./dfs/pb proto/dfs.proto
+python -m grpc_tools.protoc -I=dfs/pb --python_out=./dfs/pb --grpc_python_out=./dfs/pb dfs/pb/dfs.proto
 cd ..
 ```
 
