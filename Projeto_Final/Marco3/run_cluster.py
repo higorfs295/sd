@@ -8,7 +8,7 @@ import importlib
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
-DFS_DIR = ROOT_DIR / "DFS_M2"
+DFS_DIR = ROOT_DIR / "DFS_M3"
 
 # Adiciona DFS_M2/ ao sys.path para que este script consiga importar o pacote 'dfs'
 # Precisa vir ANTES do import de dfs.config
