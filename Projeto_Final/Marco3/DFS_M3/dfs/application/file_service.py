@@ -197,70 +197,38 @@ class FileService:
             return dfs_pb2.FileResponse(ok=False, message=f"Erro no PUT: {exc}", node_id="coordinator", shard_id=-1)
 
     def _get(self, request: dfs_pb2.FileRequest) -> dfs_pb2.FileResponse:
-        """
-        Trata a operação GET com failover transparente caso nós estejam caídos.
-        """
-        request_path = self._normalize_path(request.path)
+            """
+            NOVA LÓGICA FASE 1: O Coordenador NÃO descarrega os dados.
+            Ele apenas valida se o arquivo existe e devolve a lista de chunks/réplicas
+            em formato JSON para a CLI fazer o download direto.
+            """
+            import json
 
-        metadata = self.metadata.get_file(request_path)
-        if metadata is None:
-            return dfs_pb2.FileResponse(ok=False, message="Arquivo não encontrado no índice", node_id="coordinator", shard_id=-1)
+            request_path = self._normalize_path(request.path)
 
-        chunks = sorted(metadata["chunks"], key=lambda item: item["chunk_id"])
-        file_parts = []
+            metadata = self.metadata.get_file(request_path)
+            if metadata is None:
+                return dfs_pb2.FileResponse(ok=False, message="Arquivo não encontrado no índice", node_id="coordinator", shard_id=-1)
 
-        try:
-            for chunk in chunks:
-                chunk_id = chunk["chunk_id"]
-                chunk_path = chunk["chunk_path"]
+            try:
+                # Pegamos os metadados dos chunks (onde estão as réplicas)
+                chunks = sorted(metadata["chunks"], key=lambda item: item["chunk_id"])
                 
-                # Recupera as réplicas. Se for um metadado legado do Marco 2, reconstrói na hora
-                replicas = chunk.get("replicas", [])
-                if not replicas:
-                    replicas = [{"node_id": chunk["node_id"], "shard_id": chunk["shard_id"]}]
+                # Convertemos a lista de chunks para uma string JSON
+                chunks_map_json = json.dumps(chunks)
 
-                chunk_recuperado = False
-                errors = []
+                print(f"[COORDINATOR] GET para {request_path}. Retornando o mapa de {len(chunks)} chunk(s) para a CLI.")
 
-                # Tenta ler de cada réplica registrada sequencialmente (Failover automático)
-                for attempt, replica in enumerate(replicas, start=1):
-                    node = self._find_node_by_id(replica["node_id"])
-                    if not node:
-                        continue
-                        
-                    print(f"[GET] Solicitando chunk {chunk_id} | Tentativa {attempt}/{len(replicas)} no nó {node.node_id}")
+                # Respondemos OK e enviamos o JSON no campo 'message'
+                return dfs_pb2.FileResponse(
+                    ok=True, 
+                    message=chunks_map_json, # O mapa vai aqui!
+                    node_id="coordinator", 
+                    shard_id=-1
+                )
 
-                    response = self._send_to_node(
-                        node=node,
-                        op="GET",
-                        path=chunk_path,
-                        shard_id=replica["shard_id"],
-                    )
-
-                    if response.ok:
-                        file_parts.append(response.data)
-                        chunk_recuperado = True
-                        if attempt > 1:
-                            print(f"[GET] ⚠️ Failover ativado com sucesso! Réplica obtida do nó secundário {node.node_id}.")
-                        break
-                    else:
-                        errors.append(f"{node.node_id}: {response.message}")
-
-                # Se vasculhou todas as réplicas e não obteve o chunk, o arquivo está indisponível
-                if not chunk_recuperado:
-                    return dfs_pb2.FileResponse(
-                        ok=False, 
-                        message=f"Falha no GET: Chunk {chunk_id} inacessível em todas as réplicas. Erros: {'; '.join(errors)}", 
-                        node_id="coordinator", 
-                        shard_id=-1
-                    )
-
-            full_data = b"".join(file_parts)
-            return dfs_pb2.FileResponse(ok=True, message="Arquivo lido com sucesso", data=full_data, node_id="coordinator", shard_id=-1)
-
-        except Exception as exc:
-            return dfs_pb2.FileResponse(ok=False, message=f"Erro no GET distribuído: {exc}", node_id="coordinator", shard_id=-1)
-
+            except Exception as exc:
+                return dfs_pb2.FileResponse(ok=False, message=f"Erro ao gerar mapa de leitura: {exc}", node_id="coordinator", shard_id=-1)
     def _delete(self, request: dfs_pb2.FileRequest) -> dfs_pb2.FileResponse:
         """
         Trata a operação DELETE eliminando todas as réplicas de todos os nós.
