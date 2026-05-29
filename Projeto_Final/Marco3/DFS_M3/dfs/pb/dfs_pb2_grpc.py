@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import dfs_pb2 as dfs__pb2
+from dfs.pb import dfs_pb2 as dfs_dot_pb_dot_dfs__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in dfs_pb2_grpc.py depends on'
+        + ' but the generated code in dfs/pb/dfs_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -52,38 +52,38 @@ class ControlServiceStub(object):
         """
         self.RegisterNode = channel.unary_unary(
                 '/dfs.v1.ControlService/RegisterNode',
-                request_serializer=dfs__pb2.RegisterNodeRequest.SerializeToString,
-                response_deserializer=dfs__pb2.RegisterNodeResponse.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.RegisterNodeRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.RegisterNodeResponse.FromString,
                 _registered_method=True)
         self.Heartbeat = channel.unary_unary(
                 '/dfs.v1.ControlService/Heartbeat',
-                request_serializer=dfs__pb2.HeartbeatRequest.SerializeToString,
-                response_deserializer=dfs__pb2.HeartbeatResponse.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.HeartbeatRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.HeartbeatResponse.FromString,
                 _registered_method=True)
         self.RequestUpload = channel.unary_unary(
                 '/dfs.v1.ControlService/RequestUpload',
-                request_serializer=dfs__pb2.RequestUploadRequest.SerializeToString,
-                response_deserializer=dfs__pb2.RequestUploadResponse.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.RequestUploadRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.RequestUploadResponse.FromString,
                 _registered_method=True)
         self.ConfirmUpload = channel.unary_unary(
                 '/dfs.v1.ControlService/ConfirmUpload',
-                request_serializer=dfs__pb2.ConfirmUploadRequest.SerializeToString,
-                response_deserializer=dfs__pb2.Ack.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.ConfirmUploadRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.Ack.FromString,
                 _registered_method=True)
         self.RequestDownload = channel.unary_unary(
                 '/dfs.v1.ControlService/RequestDownload',
-                request_serializer=dfs__pb2.RequestDownloadRequest.SerializeToString,
-                response_deserializer=dfs__pb2.RequestDownloadResponse.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.RequestDownloadRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.RequestDownloadResponse.FromString,
                 _registered_method=True)
         self.DeleteFile = channel.unary_unary(
                 '/dfs.v1.ControlService/DeleteFile',
-                request_serializer=dfs__pb2.DeleteFileRequest.SerializeToString,
-                response_deserializer=dfs__pb2.Ack.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.DeleteFileRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.Ack.FromString,
                 _registered_method=True)
         self.ListFiles = channel.unary_unary(
                 '/dfs.v1.ControlService/ListFiles',
-                request_serializer=dfs__pb2.ListFilesRequest.SerializeToString,
-                response_deserializer=dfs__pb2.ListFilesResponse.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.ListFilesRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.ListFilesResponse.FromString,
                 _registered_method=True)
 
 
@@ -169,38 +169,38 @@ def add_ControlServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'RegisterNode': grpc.unary_unary_rpc_method_handler(
                     servicer.RegisterNode,
-                    request_deserializer=dfs__pb2.RegisterNodeRequest.FromString,
-                    response_serializer=dfs__pb2.RegisterNodeResponse.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.RegisterNodeRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.RegisterNodeResponse.SerializeToString,
             ),
             'Heartbeat': grpc.unary_unary_rpc_method_handler(
                     servicer.Heartbeat,
-                    request_deserializer=dfs__pb2.HeartbeatRequest.FromString,
-                    response_serializer=dfs__pb2.HeartbeatResponse.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.HeartbeatRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.HeartbeatResponse.SerializeToString,
             ),
             'RequestUpload': grpc.unary_unary_rpc_method_handler(
                     servicer.RequestUpload,
-                    request_deserializer=dfs__pb2.RequestUploadRequest.FromString,
-                    response_serializer=dfs__pb2.RequestUploadResponse.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.RequestUploadRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.RequestUploadResponse.SerializeToString,
             ),
             'ConfirmUpload': grpc.unary_unary_rpc_method_handler(
                     servicer.ConfirmUpload,
-                    request_deserializer=dfs__pb2.ConfirmUploadRequest.FromString,
-                    response_serializer=dfs__pb2.Ack.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.ConfirmUploadRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.Ack.SerializeToString,
             ),
             'RequestDownload': grpc.unary_unary_rpc_method_handler(
                     servicer.RequestDownload,
-                    request_deserializer=dfs__pb2.RequestDownloadRequest.FromString,
-                    response_serializer=dfs__pb2.RequestDownloadResponse.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.RequestDownloadRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.RequestDownloadResponse.SerializeToString,
             ),
             'DeleteFile': grpc.unary_unary_rpc_method_handler(
                     servicer.DeleteFile,
-                    request_deserializer=dfs__pb2.DeleteFileRequest.FromString,
-                    response_serializer=dfs__pb2.Ack.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.DeleteFileRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.Ack.SerializeToString,
             ),
             'ListFiles': grpc.unary_unary_rpc_method_handler(
                     servicer.ListFiles,
-                    request_deserializer=dfs__pb2.ListFilesRequest.FromString,
-                    response_serializer=dfs__pb2.ListFilesResponse.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.ListFilesRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.ListFilesResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -244,8 +244,8 @@ class ControlService(object):
             request,
             target,
             '/dfs.v1.ControlService/RegisterNode',
-            dfs__pb2.RegisterNodeRequest.SerializeToString,
-            dfs__pb2.RegisterNodeResponse.FromString,
+            dfs_dot_pb_dot_dfs__pb2.RegisterNodeRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.RegisterNodeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -271,8 +271,8 @@ class ControlService(object):
             request,
             target,
             '/dfs.v1.ControlService/Heartbeat',
-            dfs__pb2.HeartbeatRequest.SerializeToString,
-            dfs__pb2.HeartbeatResponse.FromString,
+            dfs_dot_pb_dot_dfs__pb2.HeartbeatRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.HeartbeatResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -298,8 +298,8 @@ class ControlService(object):
             request,
             target,
             '/dfs.v1.ControlService/RequestUpload',
-            dfs__pb2.RequestUploadRequest.SerializeToString,
-            dfs__pb2.RequestUploadResponse.FromString,
+            dfs_dot_pb_dot_dfs__pb2.RequestUploadRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.RequestUploadResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -325,8 +325,8 @@ class ControlService(object):
             request,
             target,
             '/dfs.v1.ControlService/ConfirmUpload',
-            dfs__pb2.ConfirmUploadRequest.SerializeToString,
-            dfs__pb2.Ack.FromString,
+            dfs_dot_pb_dot_dfs__pb2.ConfirmUploadRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,
@@ -352,8 +352,8 @@ class ControlService(object):
             request,
             target,
             '/dfs.v1.ControlService/RequestDownload',
-            dfs__pb2.RequestDownloadRequest.SerializeToString,
-            dfs__pb2.RequestDownloadResponse.FromString,
+            dfs_dot_pb_dot_dfs__pb2.RequestDownloadRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.RequestDownloadResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -379,8 +379,8 @@ class ControlService(object):
             request,
             target,
             '/dfs.v1.ControlService/DeleteFile',
-            dfs__pb2.DeleteFileRequest.SerializeToString,
-            dfs__pb2.Ack.FromString,
+            dfs_dot_pb_dot_dfs__pb2.DeleteFileRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,
@@ -406,8 +406,8 @@ class ControlService(object):
             request,
             target,
             '/dfs.v1.ControlService/ListFiles',
-            dfs__pb2.ListFilesRequest.SerializeToString,
-            dfs__pb2.ListFilesResponse.FromString,
+            dfs_dot_pb_dot_dfs__pb2.ListFilesRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.ListFilesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -440,13 +440,13 @@ class DataServiceStub(object):
         """
         self.UploadFile = channel.stream_unary(
                 '/dfs.v1.DataService/UploadFile',
-                request_serializer=dfs__pb2.UploadChunk.SerializeToString,
-                response_deserializer=dfs__pb2.UploadResult.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.UploadChunk.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.UploadResult.FromString,
                 _registered_method=True)
         self.DownloadFile = channel.unary_stream(
                 '/dfs.v1.DataService/DownloadFile',
-                request_serializer=dfs__pb2.DownloadStart.SerializeToString,
-                response_deserializer=dfs__pb2.DownloadChunk.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.DownloadStart.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.DownloadChunk.FromString,
                 _registered_method=True)
 
 
@@ -484,13 +484,13 @@ def add_DataServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'UploadFile': grpc.stream_unary_rpc_method_handler(
                     servicer.UploadFile,
-                    request_deserializer=dfs__pb2.UploadChunk.FromString,
-                    response_serializer=dfs__pb2.UploadResult.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.UploadChunk.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.UploadResult.SerializeToString,
             ),
             'DownloadFile': grpc.unary_stream_rpc_method_handler(
                     servicer.DownloadFile,
-                    request_deserializer=dfs__pb2.DownloadStart.FromString,
-                    response_serializer=dfs__pb2.DownloadChunk.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.DownloadStart.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.DownloadChunk.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -528,8 +528,8 @@ class DataService(object):
             request_iterator,
             target,
             '/dfs.v1.DataService/UploadFile',
-            dfs__pb2.UploadChunk.SerializeToString,
-            dfs__pb2.UploadResult.FromString,
+            dfs_dot_pb_dot_dfs__pb2.UploadChunk.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.UploadResult.FromString,
             options,
             channel_credentials,
             insecure,
@@ -555,8 +555,8 @@ class DataService(object):
             request,
             target,
             '/dfs.v1.DataService/DownloadFile',
-            dfs__pb2.DownloadStart.SerializeToString,
-            dfs__pb2.DownloadChunk.FromString,
+            dfs_dot_pb_dot_dfs__pb2.DownloadStart.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.DownloadChunk.FromString,
             options,
             channel_credentials,
             insecure,
@@ -593,23 +593,23 @@ class ReplicationServiceStub(object):
         """
         self.StoreChunk = channel.stream_unary(
                 '/dfs.v1.ReplicationService/StoreChunk',
-                request_serializer=dfs__pb2.StoreChunkRequest.SerializeToString,
-                response_deserializer=dfs__pb2.StoreChunkResponse.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.StoreChunkRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.StoreChunkResponse.FromString,
                 _registered_method=True)
         self.FetchChunk = channel.unary_stream(
                 '/dfs.v1.ReplicationService/FetchChunk',
-                request_serializer=dfs__pb2.FetchChunkRequest.SerializeToString,
-                response_deserializer=dfs__pb2.FetchChunkResponse.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.FetchChunkRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.FetchChunkResponse.FromString,
                 _registered_method=True)
         self.DeleteChunk = channel.unary_unary(
                 '/dfs.v1.ReplicationService/DeleteChunk',
-                request_serializer=dfs__pb2.DeleteChunkRequest.SerializeToString,
-                response_deserializer=dfs__pb2.Ack.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.DeleteChunkRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.Ack.FromString,
                 _registered_method=True)
         self.ListChunks = channel.unary_unary(
                 '/dfs.v1.ReplicationService/ListChunks',
-                request_serializer=dfs__pb2.ListChunksRequest.SerializeToString,
-                response_deserializer=dfs__pb2.ListChunksResponse.FromString,
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.ListChunksRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.ListChunksResponse.FromString,
                 _registered_method=True)
 
 
@@ -663,23 +663,23 @@ def add_ReplicationServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'StoreChunk': grpc.stream_unary_rpc_method_handler(
                     servicer.StoreChunk,
-                    request_deserializer=dfs__pb2.StoreChunkRequest.FromString,
-                    response_serializer=dfs__pb2.StoreChunkResponse.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.StoreChunkRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.StoreChunkResponse.SerializeToString,
             ),
             'FetchChunk': grpc.unary_stream_rpc_method_handler(
                     servicer.FetchChunk,
-                    request_deserializer=dfs__pb2.FetchChunkRequest.FromString,
-                    response_serializer=dfs__pb2.FetchChunkResponse.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.FetchChunkRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.FetchChunkResponse.SerializeToString,
             ),
             'DeleteChunk': grpc.unary_unary_rpc_method_handler(
                     servicer.DeleteChunk,
-                    request_deserializer=dfs__pb2.DeleteChunkRequest.FromString,
-                    response_serializer=dfs__pb2.Ack.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.DeleteChunkRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.Ack.SerializeToString,
             ),
             'ListChunks': grpc.unary_unary_rpc_method_handler(
                     servicer.ListChunks,
-                    request_deserializer=dfs__pb2.ListChunksRequest.FromString,
-                    response_serializer=dfs__pb2.ListChunksResponse.SerializeToString,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.ListChunksRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.ListChunksResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -721,8 +721,8 @@ class ReplicationService(object):
             request_iterator,
             target,
             '/dfs.v1.ReplicationService/StoreChunk',
-            dfs__pb2.StoreChunkRequest.SerializeToString,
-            dfs__pb2.StoreChunkResponse.FromString,
+            dfs_dot_pb_dot_dfs__pb2.StoreChunkRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.StoreChunkResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -748,8 +748,8 @@ class ReplicationService(object):
             request,
             target,
             '/dfs.v1.ReplicationService/FetchChunk',
-            dfs__pb2.FetchChunkRequest.SerializeToString,
-            dfs__pb2.FetchChunkResponse.FromString,
+            dfs_dot_pb_dot_dfs__pb2.FetchChunkRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.FetchChunkResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -775,8 +775,8 @@ class ReplicationService(object):
             request,
             target,
             '/dfs.v1.ReplicationService/DeleteChunk',
-            dfs__pb2.DeleteChunkRequest.SerializeToString,
-            dfs__pb2.Ack.FromString,
+            dfs_dot_pb_dot_dfs__pb2.DeleteChunkRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,
@@ -802,8 +802,8 @@ class ReplicationService(object):
             request,
             target,
             '/dfs.v1.ReplicationService/ListChunks',
-            dfs__pb2.ListChunksRequest.SerializeToString,
-            dfs__pb2.ListChunksResponse.FromString,
+            dfs_dot_pb_dot_dfs__pb2.ListChunksRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.ListChunksResponse.FromString,
             options,
             channel_credentials,
             insecure,
