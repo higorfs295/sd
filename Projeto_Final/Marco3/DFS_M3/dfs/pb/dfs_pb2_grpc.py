@@ -27,14 +27,21 @@ if _version_not_supported:
 
 class ControlServiceStub(object):
     """=============================================================================
-    CONTROLSERVICE — plano de controle
+    CONTROLSERVICE — Plano de Controle
     =============================================================================
 
-    Coordena registro, heartbeat, autorização de upload/download e metadados.
-    Não trafega bytes de usuário.
+    Implementado pelo coordenador. Responsável por:
+    - registro e supervisão dos nós (RegisterNode, Heartbeat)
+    - autorização de operações da CLI (RequestUpload, RequestDownload)
+    - persistência de metadados após operações concluídas (ConfirmUpload)
+    - operações puramente de controle (DeleteFile, ListFiles)
+
+    IMPORTANTE: NENHUMA RPC deste serviço transporta bytes de arquivos de
+    usuário. Todo o conteúdo aqui é metadado leve.
 
     =============================================================================
 
+    ---------- Registro e supervisão de nós ----------
     """
 
     def __init__(self, channel):
@@ -82,66 +89,76 @@ class ControlServiceStub(object):
 
 class ControlServiceServicer(object):
     """=============================================================================
-    CONTROLSERVICE — plano de controle
+    CONTROLSERVICE — Plano de Controle
     =============================================================================
 
-    Coordena registro, heartbeat, autorização de upload/download e metadados.
-    Não trafega bytes de usuário.
+    Implementado pelo coordenador. Responsável por:
+    - registro e supervisão dos nós (RegisterNode, Heartbeat)
+    - autorização de operações da CLI (RequestUpload, RequestDownload)
+    - persistência de metadados após operações concluídas (ConfirmUpload)
+    - operações puramente de controle (DeleteFile, ListFiles)
+
+    IMPORTANTE: NENHUMA RPC deste serviço transporta bytes de arquivos de
+    usuário. Todo o conteúdo aqui é metadado leve.
 
     =============================================================================
 
+    ---------- Registro e supervisão de nós ----------
     """
 
     def RegisterNode(self, request, context):
-        """Registro e supervisão de nós
-
-        Registra o nó no cluster.
+        """Chamada por um nó ao iniciar, para se anunciar ao coordenador.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def Heartbeat(self, request, context):
-        """Heartbeat periódico com inventário dos chunks.
+        """Chamada periodicamente por cada nó (a cada ~2s). Carrega também o
+        inventário de chunks armazenados ("block report"). Padrão herdado do HDFS.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def RequestUpload(self, request, context):
-        """Autorização de operações de dados
+        """---------- Autorização de operações de dados ----------
 
-        Inicia um upload e retorna o ingress.
+        Etapa 1 do PUT: a CLI pede permissão para enviar um arquivo. O coordenador
+        escolhe o ingress, reserva um upload_id, e devolve o endereço do ingress.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def ConfirmUpload(self, request, context):
-        """Confirma o upload e persiste os metadados.
+        """Etapa final do PUT: o INGRESS (não a CLI) confirma ao coordenador que o
+        upload foi concluído, e informa quais chunks foram criados e em quais nós.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def RequestDownload(self, request, context):
-        """Inicia um download e retorna o egress.
+        """Etapa 1 do GET: a CLI pede para baixar um arquivo. O coordenador escolhe
+        o egress (por localidade) e devolve o endereço.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def DeleteFile(self, request, context):
-        """Operações de controle puras (sem bytes)
+        """---------- Operações de controle puras (sem bytes) ----------
 
-        Remove o arquivo e apaga as réplicas.
+        Deleta um arquivo. O coordenador remove os metadados e dispara comandos
+        DeleteChunk em paralelo para todas as réplicas.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def ListFiles(self, request, context):
-        """Lista arquivos conhecidos.
+        """Lista arquivos conhecidos pelo coordenador.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -195,14 +212,21 @@ def add_ControlServiceServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class ControlService(object):
     """=============================================================================
-    CONTROLSERVICE — plano de controle
+    CONTROLSERVICE — Plano de Controle
     =============================================================================
 
-    Coordena registro, heartbeat, autorização de upload/download e metadados.
-    Não trafega bytes de usuário.
+    Implementado pelo coordenador. Responsável por:
+    - registro e supervisão dos nós (RegisterNode, Heartbeat)
+    - autorização de operações da CLI (RequestUpload, RequestDownload)
+    - persistência de metadados após operações concluídas (ConfirmUpload)
+    - operações puramente de controle (DeleteFile, ListFiles)
+
+    IMPORTANTE: NENHUMA RPC deste serviço transporta bytes de arquivos de
+    usuário. Todo o conteúdo aqui é metadado leve.
 
     =============================================================================
 
+    ---------- Registro e supervisão de nós ----------
     """
 
     @staticmethod
@@ -397,11 +421,12 @@ class ControlService(object):
 
 class DataServiceStub(object):
     """=============================================================================
-    DATASERVICE — plano de dados (interface com a CLI)
+    DATASERVICE — Plano de Dados (interface com a CLI)
     =============================================================================
 
-    Fica nos nós. A CLI só usa depois de consultar o coordenador.
-    Tudo aqui é streaming para lidar com arquivos grandes.
+    Implementado pelos NÓS. A CLI fala com este serviço APENAS depois de já
+    ter conversado com o coordenador no ControlService e recebido o endereço
+    do nó certo (ingress no PUT, egress no GET). Tudo aqui é STREAMING.
 
     =============================================================================
 
@@ -427,25 +452,28 @@ class DataServiceStub(object):
 
 class DataServiceServicer(object):
     """=============================================================================
-    DATASERVICE — plano de dados (interface com a CLI)
+    DATASERVICE — Plano de Dados (interface com a CLI)
     =============================================================================
 
-    Fica nos nós. A CLI só usa depois de consultar o coordenador.
-    Tudo aqui é streaming para lidar com arquivos grandes.
+    Implementado pelos NÓS. A CLI fala com este serviço APENAS depois de já
+    ter conversado com o coordenador no ControlService e recebido o endereço
+    do nó certo (ingress no PUT, egress no GET). Tudo aqui é STREAMING.
 
     =============================================================================
 
     """
 
     def UploadFile(self, request_iterator, context):
-        """PUT: a CLI envia UploadChunk e recebe UploadResult no fim.
+        """PUT (client-streaming): a CLI envia uma sequência de UploadChunk; ao final,
+        o ingress responde com UploadResult.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def DownloadFile(self, request, context):
-        """GET: a CLI envia DownloadStart e recebe DownloadChunk em sequência.
+        """GET (server-streaming): a CLI manda um DownloadStart e recebe uma sequência
+        de DownloadChunk até o stream fechar.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -474,11 +502,12 @@ def add_DataServiceServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class DataService(object):
     """=============================================================================
-    DATASERVICE — plano de dados (interface com a CLI)
+    DATASERVICE — Plano de Dados (interface com a CLI)
     =============================================================================
 
-    Fica nos nós. A CLI só usa depois de consultar o coordenador.
-    Tudo aqui é streaming para lidar com arquivos grandes.
+    Implementado pelos NÓS. A CLI fala com este serviço APENAS depois de já
+    ter conversado com o coordenador no ControlService e recebido o endereço
+    do nó certo (ingress no PUT, egress no GET). Tudo aqui é STREAMING.
 
     =============================================================================
 
@@ -541,10 +570,16 @@ class DataService(object):
 
 class ReplicationServiceStub(object):
     """=============================================================================
-    REPLICATIONSERVICE — comunicação entre nós
+    REPLICATIONSERVICE — Comunicação entre Nós
     =============================================================================
 
-    Usado entre nós e pelo coordenador para limpeza/diagnóstico.
+    Implementado pelos NÓS. Usado por OUTROS NÓS (e pelo coordenador para
+    operações administrativas como deleção).
+
+    1. Ingress chama StoreChunk nas outras réplicas para fan-out durante o PUT.
+    2. Egress chama FetchChunk nos peers para buscar chunks que não tem.
+    3. DeleteChunk: chamada pelo coordenador para apagar um chunk específico.
+    4. ListChunks: diagnóstico / validação cruzada com os metadados.
 
     =============================================================================
 
@@ -580,38 +615,44 @@ class ReplicationServiceStub(object):
 
 class ReplicationServiceServicer(object):
     """=============================================================================
-    REPLICATIONSERVICE — comunicação entre nós
+    REPLICATIONSERVICE — Comunicação entre Nós
     =============================================================================
 
-    Usado entre nós e pelo coordenador para limpeza/diagnóstico.
+    Implementado pelos NÓS. Usado por OUTROS NÓS (e pelo coordenador para
+    operações administrativas como deleção).
+
+    1. Ingress chama StoreChunk nas outras réplicas para fan-out durante o PUT.
+    2. Egress chama FetchChunk nos peers para buscar chunks que não tem.
+    3. DeleteChunk: chamada pelo coordenador para apagar um chunk específico.
+    4. ListChunks: diagnóstico / validação cruzada com os metadados.
 
     =============================================================================
 
     """
 
     def StoreChunk(self, request_iterator, context):
-        """PUT da réplica: recebe um chunk e grava localmente.
+        """PUT lado-réplica: outro nó (o ingress) envia este chunk para ser armazenado.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def FetchChunk(self, request, context):
-        """GET entre peers: envia um chunk específico.
+        """GET lado-peer: outro nó (o egress) pede um chunk específico.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def DeleteChunk(self, request, context):
-        """Apaga um chunk local.
+        """Apaga um chunk específico do disco local.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def ListChunks(self, request, context):
-        """Lista os chunks locais.
+        """Lista os chunks armazenados localmente.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -650,10 +691,16 @@ def add_ReplicationServiceServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class ReplicationService(object):
     """=============================================================================
-    REPLICATIONSERVICE — comunicação entre nós
+    REPLICATIONSERVICE — Comunicação entre Nós
     =============================================================================
 
-    Usado entre nós e pelo coordenador para limpeza/diagnóstico.
+    Implementado pelos NÓS. Usado por OUTROS NÓS (e pelo coordenador para
+    operações administrativas como deleção).
+
+    1. Ingress chama StoreChunk nas outras réplicas para fan-out durante o PUT.
+    2. Egress chama FetchChunk nos peers para buscar chunks que não tem.
+    3. DeleteChunk: chamada pelo coordenador para apagar um chunk específico.
+    4. ListChunks: diagnóstico / validação cruzada com os metadados.
 
     =============================================================================
 

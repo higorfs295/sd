@@ -1,3 +1,59 @@
+// =============================================================================
+// dfs.proto — Contrato de Comunicação do Sistema de Arquivos Distribuído
+// =============================================================================
+//
+// Este arquivo é a ÚNICA fonte de verdade sobre os formatos de mensagens e
+// as assinaturas das RPCs trocadas no cluster. O código Python correspondente
+// (dfs_pb2.py e dfs_pb2_grpc.py) é gerado automaticamente pelo compilador
+// `grpc_tools.protoc`. Nunca edite os arquivos gerados — sempre edite ESTE.
+//
+// -----------------------------------------------------------------------------
+// ARQUITETURA DE REFERÊNCIA
+// -----------------------------------------------------------------------------
+//
+// Topologia:
+//   - 1 coordenador (centraliza CONTROLE; nunca toca em bytes de arquivos)
+//   - 5 nós de armazenamento (centralizam DADOS; replicam entre si)
+//   - 1 ou mais clientes (CLI)
+//
+// Fator de replicação: R = 3
+//
+// Estratégia de placement (round-robin determinístico por índice de chunk,
+// com N = 5 nós):
+//   chunk i tem réplicas em [N((i+0) % 5), N((i+1) % 5), N((i+2) % 5)]
+// O primeiro nó da lista é também o INGRESS quando o chunk é gravado pela
+// primeira vez. Como a regra é determinística, qualquer componente do sistema
+// pode calcular o placement de um chunk apenas a partir do seu índice — não
+// é necessário persistir essa informação separadamente.
+//
+// Modelo de operação (gateway, decisão A.3 + B.2):
+//   - PUT: cliente envia o arquivo inteiro, em stream, para UM nó (ingress).
+//          O ingress fatia em chunks e replica em paralelo para as outras
+//          duas réplicas de cada chunk, segundo a regra round-robin.
+//   - GET: cliente pede o arquivo, em stream, a UM nó (egress). O egress
+//          junta os chunks (locais + buscas em peers) e devolve em ordem.
+//   - O coordenador NÃO toca em bytes. Só decide quem é o ingress/egress
+//     e persiste metadados.
+//
+// -----------------------------------------------------------------------------
+// SEPARAÇÃO EM TRÊS SERVIÇOS
+// -----------------------------------------------------------------------------
+//
+//   1. ControlService     — implementado pelo COORDENADOR
+//        clientes: CLI (operações de controle) e nós (registro/heartbeat)
+//        tráfego: pequeno (kB), RPCs unárias
+//
+//   2. DataService        — implementado pelos NÓS
+//        clientes: CLI (PUT e GET)
+//        tráfego: grande (MB-GB), RPCs com STREAMING
+//
+//   3. ReplicationService — implementado pelos NÓS
+//        clientes: outros NÓS (ingress→réplicas, egress→peers)
+//                  e coordenador (re-replicação, deleção)
+//        tráfego: grande (MB), RPCs com STREAMING
+//
+// =============================================================================
+
 syntax = "proto3";
 
 package dfs.v1;
@@ -6,175 +62,160 @@ package dfs.v1;
 // MENSAGENS COMUNS (usadas por mais de um serviço)
 // =============================================================================
 
-// Identifica um nó do cluster.
+// Identifica um nó do cluster. Usada em respostas de placement, em listas
+// de réplicas, em registros e em heartbeats.
 message NodeRef {
-  // ID lógico do nó. Ex.: "node1".
+  // ID lógico do nó, ex: "node1". Estável durante a vida do nó.
   string node_id = 1;
 
-  // Endereço gRPC do nó.
+  // Endereço de rede onde o nó escuta gRPC. Quando o ingress repassa um
+  // chunk para uma réplica, ele usa exatamente esse par (host, port) para
+  // abrir o canal.
   string host = 2;
-  int32  port = 3;
+  int32 port = 3;
 }
 
-// Resposta genérica para RPCs simples de sucesso/erro.
+// Resposta genérica usada por RPCs cujo retorno é só "deu certo ou não".
 message Ack {
-  bool   ok      = 1;
-  string message = 2;  // Mensagem de sucesso ou erro.
+  bool ok = 1;
+  string message = 2; // Mensagem amigável (sucesso ou descrição do erro).
 }
 
-// Status atribuído pelo coordenador com base nos heartbeats.
+// Status que o coordenador pode atribuir a um nó com base em heartbeats.
 enum NodeStatus {
-  NODE_STATUS_UNKNOWN = 0;  // Default.
-  NODE_STATUS_ALIVE   = 1;  // Heartbeat recente.
-  NODE_STATUS_SUSPECT = 2;  // Atrasado, mas não morto.
-  NODE_STATUS_DEAD    = 3;  // Sem heartbeat há tempo suficiente.
+  NODE_STATUS_UNKNOWN = 0; // Default obrigatório em proto3 (índice 0).
+  NODE_STATUS_ALIVE = 1;   // Heartbeat recente, nó saudável.
+  NODE_STATUS_SUSPECT = 2; // Heartbeat atrasado, mas ainda não considerado morto.
+  NODE_STATUS_DEAD = 3;    // Heartbeat ausente por tempo suficiente.
 }
 
 // =============================================================================
-// CONTROLSERVICE — plano de controle
+// CONTROLSERVICE — Plano de Controle
 // =============================================================================
 //
-// Coordena registro, heartbeat, autorização de upload/download e metadados.
-// Não trafega bytes de usuário.
+// Implementado pelo coordenador. Responsável por:
+//   - registro e supervisão dos nós (RegisterNode, Heartbeat)
+//   - autorização de operações da CLI (RequestUpload, RequestDownload)
+//   - persistência de metadados após operações concluídas (ConfirmUpload)
+//   - operações puramente de controle (DeleteFile, ListFiles)
+//
+// IMPORTANTE: NENHUMA RPC deste serviço transporta bytes de arquivos de
+// usuário. Todo o conteúdo aqui é metadado leve.
 //
 // =============================================================================
 
 service ControlService {
+  // ---------- Registro e supervisão de nós ----------
 
-  // Registro e supervisão de nós
-
-  // Registra o nó no cluster.
+  // Chamada por um nó ao iniciar, para se anunciar ao coordenador.
   rpc RegisterNode (RegisterNodeRequest) returns (RegisterNodeResponse);
 
-  // Heartbeat periódico com inventário dos chunks.
+  // Chamada periodicamente por cada nó (a cada ~2s). Carrega também o
+  // inventário de chunks armazenados ("block report"). Padrão herdado do HDFS.
   rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
 
-  // Autorização de operações de dados
+  // ---------- Autorização de operações de dados ----------
 
-  // Inicia um upload e retorna o ingress.
+  // Etapa 1 do PUT: a CLI pede permissão para enviar um arquivo. O coordenador
+  // escolhe o ingress, reserva um upload_id, e devolve o endereço do ingress.
   rpc RequestUpload (RequestUploadRequest) returns (RequestUploadResponse);
 
-  // Confirma o upload e persiste os metadados.
+  // Etapa final do PUT: o INGRESS (não a CLI) confirma ao coordenador que o
+  // upload foi concluído, e informa quais chunks foram criados e em quais nós.
   rpc ConfirmUpload (ConfirmUploadRequest) returns (Ack);
 
-  // Inicia um download e retorna o egress.
+  // Etapa 1 do GET: a CLI pede para baixar um arquivo. O coordenador escolhe
+  // o egress (por localidade) e devolve o endereço.
   rpc RequestDownload (RequestDownloadRequest) returns (RequestDownloadResponse);
 
-  // Operações de controle puras (sem bytes)
+  // ---------- Operações de controle puras (sem bytes) ----------
 
-  // Remove o arquivo e apaga as réplicas.
+  // Deleta um arquivo. O coordenador remove os metadados e dispara comandos
+  // DeleteChunk em paralelo para todas as réplicas.
   rpc DeleteFile (DeleteFileRequest) returns (Ack);
 
-  // Lista arquivos conhecidos.
+  // Lista arquivos conhecidos pelo coordenador.
   rpc ListFiles (ListFilesRequest) returns (ListFilesResponse);
 }
 
 // ---------- Mensagens do ControlService ----------
 
 message RegisterNodeRequest {
-  // Nó e endereço de escuta.
   NodeRef node = 1;
-
-  // Espaço livre em bytes.
   int64 free_space_bytes = 2;
 }
 
 message RegisterNodeResponse {
-  bool   ok      = 1;
+  bool ok = 1;
   string message = 2;
-
-  // Parâmetros do cluster.
-  int32 cluster_node_count       = 3;
-  int32 replication_factor       = 4;
-  int64 chunk_size_bytes         = 5;
-  int32 heartbeat_interval_secs  = 6;
+  // Parâmetros do cluster, para garantir que todos os nós estão configurados
+  // igualmente.
+  int32 cluster_node_count = 3;
+  int32 replication_factor = 4;
+  int64 chunk_size_bytes = 5;
+  int32 heartbeat_interval_secs = 6;
 }
 
 message HeartbeatRequest {
-  // ID do nó que enviou o heartbeat.
   string node_id = 1;
-
-  // Espaço livre atualizado.
   int64 free_space_bytes = 2;
-
-  // Carga atual do nó.
-  int32 active_uploads   = 3;
+  int32 active_uploads = 3;
   int32 active_downloads = 4;
-
-  // Block report com os chunks locais.
+  // "Block report": inventário leve dos chunks que o nó possui.
   repeated string chunk_ids = 5;
 }
 
 message HeartbeatResponse {
   bool ok = 1;
-
-  // Chunks órfãos para apagar.
+  // O coordenador pode pedir ao nó que apague chunks órfãos detectados.
   repeated string chunks_to_delete = 2;
 }
 
 message RequestUploadRequest {
-  // Caminho lógico do arquivo.
   string logical_path = 1;
-
-  // Tamanho total do arquivo.
   int64 total_size_bytes = 2;
-
-  // ID do cliente para deduplicação.
+  // ID de cliente para deduplicação em caso de retry.
   string client_request_id = 3;
 }
 
 message RequestUploadResponse {
-  bool   ok      = 1;
+  bool ok = 1;
   string message = 2;
-
-  // Token do upload.
+  // Token único desta operação de upload.
   string upload_id = 3;
-
-  // Nó ingress do arquivo.
+  // O nó que vai receber o stream da CLI (ingress do arquivo inteiro).
   NodeRef ingress = 4;
 }
 
 message ChunkPlacement {
-  // ID estável do chunk.
+  // ID estável do chunk. Sugestão: "<upload_id>_chunk_<índice>".
   string chunk_id = 1;
-
-  // Índice do chunk no arquivo.
+  // Índice ordinal dentro do arquivo (0, 1, 2, ...). Entra na regra round-robin.
   int32 chunk_index = 2;
-
-  // Tamanho efetivo do chunk.
+  // Tamanho efetivo do chunk em bytes (pode ser menor no último chunk).
   int64 size_bytes = 3;
-
-  // Réplicas armazenadas.
+  // Réplicas onde este chunk foi efetivamente armazenado (primeira = primary).
   repeated NodeRef replicas = 4;
 }
 
 message ConfirmUploadRequest {
-  // Liga a confirmação ao upload original.
   string upload_id = 1;
-
-  // Chunks efetivamente armazenados.
+  // O ingress reporta tudo o que foi efetivamente armazenado.
   repeated ChunkPlacement chunks = 2;
-
-  // Tamanho total gravado.
   int64 total_size_bytes = 3;
 }
 
 message RequestDownloadRequest {
   string logical_path = 1;
-  string client_request_id = 2;  // Dedup do download.
+  string client_request_id = 2;
 }
 
 message RequestDownloadResponse {
-  bool   ok      = 1;
+  bool ok = 1;
   string message = 2;
-
-  // Token do download.
   string download_id = 3;
-
-  // Nó egress do arquivo.
+  // O nó que vai servir o stream para a CLI (egress, escolhido por localidade).
   NodeRef egress = 4;
-
-  // Tamanho total esperado.
   int64 total_size_bytes = 5;
 }
 
@@ -183,15 +224,14 @@ message DeleteFileRequest {
 }
 
 message ListFilesRequest {
-  // Reservado para filtros futuros.
+  // Reservado para filtros futuros (prefixo, etc). Vazio por enquanto.
 }
 
 message FileEntry {
-  string logical_path     = 1;
-  int64  total_size_bytes = 2;
-  int32  chunk_count      = 3;
-
-  // Nós que possuem ao menos um chunk.
+  string logical_path = 1;
+  int64 total_size_bytes = 2;
+  int32 chunk_count = 3;
+  // Conjunto único de IDs de nós que possuem pelo menos um chunk deste arquivo.
   repeated string nodes_used = 4;
 }
 
@@ -200,109 +240,109 @@ message ListFilesResponse {
 }
 
 // =============================================================================
-// DATASERVICE — plano de dados (interface com a CLI)
+// DATASERVICE — Plano de Dados (interface com a CLI)
 // =============================================================================
 //
-// Fica nos nós. A CLI só usa depois de consultar o coordenador.
-// Tudo aqui é streaming para lidar com arquivos grandes.
+// Implementado pelos NÓS. A CLI fala com este serviço APENAS depois de já
+// ter conversado com o coordenador no ControlService e recebido o endereço
+// do nó certo (ingress no PUT, egress no GET). Tudo aqui é STREAMING.
 //
 // =============================================================================
 
 service DataService {
-
-  // PUT: a CLI envia UploadChunk e recebe UploadResult no fim.
+  // PUT (client-streaming): a CLI envia uma sequência de UploadChunk; ao final,
+  // o ingress responde com UploadResult.
   rpc UploadFile (stream UploadChunk) returns (UploadResult);
 
-  // GET: a CLI envia DownloadStart e recebe DownloadChunk em sequência.
+  // GET (server-streaming): a CLI manda um DownloadStart e recebe uma sequência
+  // de DownloadChunk até o stream fechar.
   rpc DownloadFile (DownloadStart) returns (stream DownloadChunk);
 }
 
 // ---------- Mensagens do DataService ----------
 
 message UploadChunk {
-  // Token de autorização do upload.
+  // A primeira mensagem do stream DEVE conter o upload_id emitido pelo
+  // coordenador. Mensagens subsequentes podem omitir.
   string upload_id = 1;
-
-  // Bytes do arquivo.
+  // Os bytes do arquivo (ou parte dele). A CLI quebra em pedaços convenientes
+  // para o streaming (ex.: 64KB); o ingress re-agrupa em chunks oficiais.
   bytes data = 2;
 }
 
 message UploadResult {
-  bool   ok      = 1;
+  bool ok = 1;
   string message = 2;
-
-  // Resultado do upload e contagem final.
   int32 chunks_written = 3;
   int64 total_bytes_written = 4;
 }
 
 message DownloadStart {
-  // Token de autorização do download.
+  // Token emitido pelo coordenador no RequestDownload.
   string download_id = 1;
 }
 
 message DownloadChunk {
-  // Bytes do arquivo em ordem.
+  // Os bytes do arquivo, em ordem sequencial estrita.
   bytes data = 1;
-
-  // Marca opcional de último chunk.
+  // Flag opcional indicando a última mensagem do stream (redundante com o
+  // fechamento natural do stream gRPC, mas útil para conferir integridade).
   bool is_last = 2;
 }
 
 // =============================================================================
-// REPLICATIONSERVICE — comunicação entre nós
+// REPLICATIONSERVICE — Comunicação entre Nós
 // =============================================================================
 //
-// Usado entre nós e pelo coordenador para limpeza/diagnóstico.
+// Implementado pelos NÓS. Usado por OUTROS NÓS (e pelo coordenador para
+// operações administrativas como deleção).
+//
+//   1. Ingress chama StoreChunk nas outras réplicas para fan-out durante o PUT.
+//   2. Egress chama FetchChunk nos peers para buscar chunks que não tem.
+//   3. DeleteChunk: chamada pelo coordenador para apagar um chunk específico.
+//   4. ListChunks: diagnóstico / validação cruzada com os metadados.
 //
 // =============================================================================
 
 service ReplicationService {
-
-  // PUT da réplica: recebe um chunk e grava localmente.
+  // PUT lado-réplica: outro nó (o ingress) envia este chunk para ser armazenado.
   rpc StoreChunk (stream StoreChunkRequest) returns (StoreChunkResponse);
 
-  // GET entre peers: envia um chunk específico.
+  // GET lado-peer: outro nó (o egress) pede um chunk específico.
   rpc FetchChunk (FetchChunkRequest) returns (stream FetchChunkResponse);
 
-  // Apaga um chunk local.
+  // Apaga um chunk específico do disco local.
   rpc DeleteChunk (DeleteChunkRequest) returns (Ack);
 
-  // Lista os chunks locais.
+  // Lista os chunks armazenados localmente.
   rpc ListChunks (ListChunksRequest) returns (ListChunksResponse);
 }
 
 // ---------- Mensagens do ReplicationService ----------
 
 message StoreChunkRequest {
-  // Primeira mensagem traz metadados; as demais, só bytes.
-
-  string chunk_id    = 1;  // ID estável do chunk.
-  int32  chunk_index = 2;  // Índice do chunk.
-  string upload_id   = 3;  // Upload relacionado.
-  string origin_node_id = 4;  // Nó de origem.
-
-  // Bytes do chunk.
+  // Primeira mensagem do stream traz metadados; mensagens seguintes só bytes.
+  string chunk_id = 1;        // ID estável do chunk (mesmo do ChunkPlacement)
+  int32 chunk_index = 2;      // Índice ordinal no arquivo
+  string upload_id = 3;       // Liga a operação ao upload do ingress
+  string origin_node_id = 4;  // Quem está enviando (útil para logs)
+  // Os bytes. Em mensagens de continuação, só este campo vem preenchido.
   bytes data = 5;
 }
 
 message StoreChunkResponse {
-  bool   ok      = 1;
+  bool ok = 1;
   string message = 2;
-
-  // Total gravado.
   int64 bytes_written = 3;
 }
 
 message FetchChunkRequest {
   string chunk_id = 1;
-
-  // Nó que fez a requisição.
-  string origin_node_id = 2;
+  string origin_node_id = 2; // Quem está pedindo (útil para logs e métricas).
 }
 
 message FetchChunkResponse {
-  // Bytes do chunk.
+  // Stream dos bytes do chunk, em ordem.
   bytes data = 1;
 }
 
@@ -315,6 +355,5 @@ message ListChunksRequest {
 }
 
 message ListChunksResponse {
-  // Chunks armazenados neste nó.
   repeated string chunk_ids = 1;
 }
