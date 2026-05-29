@@ -1,167 +1,182 @@
 """
 DESCRIÇÃO GERAL:
-Esta camada representa a lógica de negócio executada
-dentro de cada storage node do cluster DFS.
+Esta camada representa a lógica de negócio executada dentro de cada storage
+node do cluster DFS, agora adaptada ao contrato A.3 + B.2 (control plane vs
+data plane). O coordenador decide; o NodeService EXECUTA localmente.
 
-O coordenador:
-- recebe operações do cliente;
-- decide para qual nó enviar;
-- distribui chunks.
-
-Já o NodeService:
-- executa a operação LOCALMENTE;
-- manipula o storage físico;
-- devolve respostas padronizadas.
+No modelo novo o nó tem dois papéis que coexistem:
+  - papel PASSIVO (réplica/peer): armazena, lê, apaga e lista chunks locais.
+    Usado pelo ReplicationService (StoreChunk/FetchChunk/DeleteChunk/ListChunks).
+  - papel GATEWAY: quando designado pelo coordenador, atua como ingress (recebe
+    o stream da CLI, fatia em chunks, replica) ou egress (junta chunks locais +
+    remotos e devolve em ordem). Usado pelo DataService (UploadFile/DownloadFile).
 
 IMPORTANTE:
-O NodeService NÃO toma decisões de sharding.
-Ele apenas executa operações locais.
+O NodeService NÃO decide placement de forma autônoma — ele APLICA a regra
+determinística de placement.py para saber, dado um chunk_index, quais nós são
+réplicas. A decisão (a regra) é compartilhada; a aplicação (replicar de fato)
+é trabalho do plano de dados.
+
+O servicer gRPC (storage_node.py) é só um tradutor: converte stream gRPC em
+chamadas a estes métodos. Toda a lógica pesada (re-fragmentação do stream em
+chunks, fan-out de replicação, montagem no egress) mora AQUI.
 """
 
+from pathlib import Path
+
 from dfs.storage.local_storage import LocalStorage
-from dfs.pb import dfs_pb2  # Importamos diretamente as mensagens geradas
+from dfs.pb import dfs_pb2
+
+# Convenção de armazenamento de chunk no disco local do nó. Cada chunk é um
+# arquivo cujo nome é o próprio chunk_id, sob a pasta "chunks/". O .meta (hash,
+# versão, timestamp) que o documento sugere é refinamento futuro — comece simples.
+CHUNKS_SUBDIR = "chunks"
 
 
 class NodeService:
     """
     Serviço local executado dentro de cada storage node.
 
-    Responsabilidades:
-    - salvar chunks;
-    - recuperar chunks;
-    - remover chunks;
-    - listar conteúdo físico do nó.
+    Responsabilidades (papel passivo): salvar / recuperar / remover / listar
+    chunks físicos. Responsabilidades (papel gateway): orquestrar ingress e egress.
     """
 
-    def __init__(
-        self,
-        storage: LocalStorage,
-        node_id: str,
-        shard_id: int,
-    ):
-        """
-        Inicializa o serviço do nó.
-        """
-
-        # ========================================================
-        # STORAGE LOCAL
-        # ========================================================
-
-        # Camada responsável pelo disco local do nó.
+    def __init__(self, storage: LocalStorage, node_id: str, shard_id: int):
+        # Camada responsável pelo disco local do nó (reaproveitada do Marco 2).
         self.storage = storage
-
-        # ========================================================
-        # IDENTIFICAÇÃO DO NÓ
-        # ========================================================
-
-        # Usado para rastreabilidade e debug.
+        # Usado para rastreabilidade, logs e como origin_node_id na replicação.
         self.node_id = node_id
-
-        # Índice lógico do shard deste nó.
+        # Índice lógico do nó. No modelo novo, o "shard" deixa de vir de hashing
+        # e passa a ser só a posição do nó na membership canônica (usada pelo
+        # placement). Mantido por compatibilidade; pode virar irrelevante.
         self.shard_id = shard_id
 
-    def dispatch(self, request: dfs_pb2.FileRequest) -> dfs_pb2.FileResponse:
+    # =========================================================================
+    # PAPEL PASSIVO — operações finas de chunk (embrulham o LocalStorage)
+    # Estes são chamados pelo ReplicationService e, internamente, pelo gateway.
+    # =========================================================================
+
+    def _chunk_path(self, chunk_id: str) -> str:
+        # Caminho lógico do chunk dentro da raiz do nó. O LocalStorage resolve
+        # e protege contra path traversal.
+        return f"{CHUNKS_SUBDIR}/{chunk_id}"
+
+    def store_chunk(self, chunk_id: str, data: bytes) -> int:
         """
-        Processa uma requisição recebida pela rede (agora via gRPC).
-
-        Fluxo:
-        1) recebe objeto protobuf;
-        2) identifica operação;
-        3) executa operação local;
-        4) devolve resposta protobuf.
+        Grava um chunk no disco local. Retorna o nº de bytes gravados.
+        Usado por StoreChunk (réplica recebendo do ingress).
         """
+        self.storage.put(self._chunk_path(chunk_id), data)
+        return len(data)
 
-        # Normaliza o nome da operação (o request já vem parseado pelo gRPC)
-        op = request.op.upper().strip()
+    def read_chunk(self, chunk_id: str) -> bytes:
+        """
+        Lê um chunk do disco local. Levanta se não existir (o chamador trata).
+        Usado por FetchChunk (peer servindo o egress) e pelo egress local.
+        """
+        return self.storage.get(self._chunk_path(chunk_id))
 
-        try:
+    def has_chunk(self, chunk_id: str) -> bool:
+        """
+        True se o chunk existe localmente. O egress usa isto para decidir o que
+        tem em casa e o que precisa buscar em peers via FetchChunk.
+        """
+        # TODO: depende de como você expõe existência no LocalStorage. Uma forma
+        # simples é tentar resolver o path e checar .exists(). Outra é olhar
+        # list_chunk_ids(). Decisão tua — abaixo a versão simples por listagem.
+        return chunk_id in set(self.list_chunk_ids())
 
-            # ====================================================
-            # PUT
-            # ====================================================
-            if op == "PUT":
-                """
-                Salva um arquivo/chunk localmente.
-                """
-                self.storage.put(
-                    request.path,
-                    request.data,
-                )
+    def delete_chunk(self, chunk_id: str) -> None:
+        """
+        Remove um chunk do disco local. Usado por DeleteChunk (coordenador no
+        DELETE de arquivo ou limpeza de órfãos).
+        """
+        self.storage.delete(self._chunk_path(chunk_id))
 
-                return dfs_pb2.FileResponse(
-                    ok=True,
-                    message="Arquivo salvo com sucesso",
-                    node_id=self.node_id,
-                    shard_id=self.shard_id,
-                )
+    def list_chunk_ids(self) -> list[str]:
+        """
+        Lista os chunk_ids fisicamente presentes neste nó. É o "block report"
+        do heartbeat e a resposta do ListChunks.
+        """
+        prefixo = f"{CHUNKS_SUBDIR}/"
+        ids = []
+        for caminho in self.storage.list_files():
+            # list_files() devolve paths relativos à raiz (ex.: "chunks/<id>").
+            # Tiramos o prefixo para devolver só o chunk_id.
+            if caminho.startswith(prefixo):
+                ids.append(caminho[len(prefixo):])
+        return sorted(ids)
 
-            # ====================================================
-            # GET
-            # ====================================================
-            if op == "GET":
-                """
-                Recupera um arquivo/chunk localmente.
-                """
-                data = self.storage.get(request.path)
+    # =========================================================================
+    # PAPEL GATEWAY — ingress (PUT) e egress (GET)
+    # Aqui está o MIOLO do Bloco 2. Os métodos abaixo são esqueleto: a estrutura
+    # está montada, mas as decisões centrais são SUAS e estão marcadas com TODO.
+    # =========================================================================
 
-                return dfs_pb2.FileResponse(
-                    ok=True,
-                    message="Arquivo encontrado",
-                    data=data,
-                    node_id=self.node_id,
-                    shard_id=self.shard_id,
-                )
+    def handle_upload_stream(self, request_iterator, nodes, cluster_size):
+        """
+        MODO INGRESS. Recebe o stream de UploadChunk vindo da CLI, re-fragmenta
+        em chunks do tamanho oficial do DFS, e para cada chunk: grava onde este
+        nó for réplica + dispara StoreChunk para as DEMAIS réplicas (fan-out).
 
-            # ====================================================
-            # DELETE
-            # ====================================================
-            if op == "DELETE":
-                """
-                Remove um arquivo/chunk localmente.
-                """
-                self.storage.delete(request.path)
+        Retorna a lista de ChunkPlacement efetivamente gravados — é o que o
+        servicer vai usar para (a) responder UploadResult à CLI e (b) o
+        ConfirmUpload ao coordenador.
 
-                return dfs_pb2.FileResponse(
-                    ok=True,
-                    message="Arquivo removido com sucesso",
-                    node_id=self.node_id,
-                    shard_id=self.shard_id,
-                )
+        >>> PONTOS QUE SÃO DECISÃO SUA (TODO):
 
-            # ====================================================
-            # LIST
-            # ====================================================
-            if op == "LIST":
-                """
-                Lista arquivos físicos (chunks reais presentes no nó).
-                """
-                entries = self.storage.list_files()
+        1. RE-FRAGMENTAÇÃO. O stream chega em pedaços de transporte (ex.: 64KB),
+           que NÃO são os chunks oficiais (ex.: 4MB). Você precisa acumular num
+           buffer até fechar CHUNK_SIZE, materializar o chunk, e seguir. O último
+           chunk é o resto do buffer quando o stream acaba. Esqueleto do laço:
 
-                return dfs_pb2.FileResponse(
-                    ok=True,
-                    message="Listagem concluída",
-                    entries=entries,  # O Protobuf aceita listas Python diretas para campos 'repeated'
-                    node_id=self.node_id,
-                    shard_id=self.shard_id,
-                )
+               buffer = bytearray()
+               chunk_index = 0
+               primeira = next(request_iterator)   # traz o upload_id
+               upload_id = primeira.upload_id
+               buffer.extend(primeira.data)
+               for msg in request_iterator:
+                   buffer.extend(msg.data)
+                   while len(buffer) >= CHUNK_SIZE:
+                       corpo = bytes(buffer[:CHUNK_SIZE])
+                       del buffer[:CHUNK_SIZE]
+                       self._materializar_chunk(upload_id, chunk_index, corpo, nodes, cluster_size)
+                       chunk_index += 1
+               if buffer:  # resto vira o último chunk
+                   self._materializar_chunk(upload_id, chunk_index, bytes(buffer), ...)
 
-            # ====================================================
-            # OPERAÇÃO INVÁLIDA
-            # ====================================================
-            return dfs_pb2.FileResponse(
-                ok=False,
-                message=f"Operação inválida: {op}",
-                node_id=self.node_id,
-                shard_id=self.shard_id,
-            )
+        2. CHUNK_SIZE. De onde vem? Do RegisterNodeResponse.chunk_size_bytes que
+           o coordenador devolve, ou do config. Decida e seja consistente.
 
-        except Exception as exc:
-            """
-            Qualquer erro local é convertido em resposta controlada.
-            """
-            return dfs_pb2.FileResponse(
-                ok=False,
-                message=f"Erro local no nó {self.node_id}: {exc}",
-                node_id=self.node_id,
-                shard_id=self.shard_id,
-            )
+        3. FAN-OUT PARALELO. _materializar_chunk calcula as réplicas com
+           placement.replicas_for_chunk(chunk_index, nodes, cluster_size=cluster_size).
+           Se este nó está na lista -> grava local (store_chunk). Para as outras
+           -> abre StoreChunk em paralelo (ThreadPoolExecutor) e espera os ACKs.
+           Como tratar replicação parcial (uma réplica falhou) é decisão sua:
+           aborta tudo? confirma só o que deu? O documento sugere reportar ao
+           coordenador o que REALMENTE conseguiu.
+        """
+        raise NotImplementedError("Ingress: implementar re-fragmentação + fan-out")
+
+    def handle_download(self, download_id, nodes, cluster_size):
+        """
+        MODO EGRESS. Gera (yield) os bytes do arquivo em ordem, para o servicer
+        repassar à CLI como stream de DownloadChunk.
+
+        >>> PONTOS QUE SÃO DECISÃO SUA (TODO):
+
+        1. DE ONDE VEM A LISTA DE CHUNKS DO ARQUIVO? O egress precisa saber quais
+           chunk_ids compõem o arquivo e em que ordem. No fluxo real isso vem do
+           coordenador (que tem os metadados). Como o download_id chega aqui mas
+           os metadados estão no coordenador, você precisa decidir: o egress
+           pergunta ao coordenador via ControlService? Ou o RequestDownload já
+           devolve a lista? (Isso pode exigir um ajuste combinado com a Vitória.)
+
+        2. LOCAL vs REMOTO. Para cada chunk na ordem: se has_chunk() -> read_chunk
+           local; senão -> calcula quais nós são réplicas (placement) e busca via
+           FetchChunk no primeiro peer vivo.
+
+        3. ORDEM. Os chunks DEVEM sair na ordem do arquivo (índice crescente),
+           senão a CLI remonta lixo. Bufferize/ordene conforme necessário.
+        """
+        raise NotImplementedError("Egress: implementar montagem ordenada")
