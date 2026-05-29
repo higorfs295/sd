@@ -25,9 +25,16 @@ if _version_not_supported:
     )
 
 
-class DFSServiceStub(object):
-    """============== SERVIÇOS ==============
-    grpc
+class ControlServiceStub(object):
+    """=============================================================================
+    CONTROLSERVICE — plano de controle
+    =============================================================================
+
+    Coordena registro, heartbeat, autorização de upload/download e metadados.
+    Não trafega bytes de usuário.
+
+    =============================================================================
+
     """
 
     def __init__(self, channel):
@@ -36,70 +43,170 @@ class DFSServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.ProcessChunk = channel.unary_unary(
-                '/dfs.v1.DFSService/ProcessChunk',
-                request_serializer=dfs__pb2.FileRequest.SerializeToString,
-                response_deserializer=dfs__pb2.FileResponse.FromString,
+        self.RegisterNode = channel.unary_unary(
+                '/dfs.v1.ControlService/RegisterNode',
+                request_serializer=dfs__pb2.RegisterNodeRequest.SerializeToString,
+                response_deserializer=dfs__pb2.RegisterNodeResponse.FromString,
                 _registered_method=True)
-        self.GetFileMap = channel.unary_unary(
-                '/dfs.v1.DFSService/GetFileMap',
-                request_serializer=dfs__pb2.GetMapRequest.SerializeToString,
-                response_deserializer=dfs__pb2.FileMap.FromString,
+        self.Heartbeat = channel.unary_unary(
+                '/dfs.v1.ControlService/Heartbeat',
+                request_serializer=dfs__pb2.HeartbeatRequest.SerializeToString,
+                response_deserializer=dfs__pb2.HeartbeatResponse.FromString,
+                _registered_method=True)
+        self.RequestUpload = channel.unary_unary(
+                '/dfs.v1.ControlService/RequestUpload',
+                request_serializer=dfs__pb2.RequestUploadRequest.SerializeToString,
+                response_deserializer=dfs__pb2.RequestUploadResponse.FromString,
+                _registered_method=True)
+        self.ConfirmUpload = channel.unary_unary(
+                '/dfs.v1.ControlService/ConfirmUpload',
+                request_serializer=dfs__pb2.ConfirmUploadRequest.SerializeToString,
+                response_deserializer=dfs__pb2.Ack.FromString,
+                _registered_method=True)
+        self.RequestDownload = channel.unary_unary(
+                '/dfs.v1.ControlService/RequestDownload',
+                request_serializer=dfs__pb2.RequestDownloadRequest.SerializeToString,
+                response_deserializer=dfs__pb2.RequestDownloadResponse.FromString,
+                _registered_method=True)
+        self.DeleteFile = channel.unary_unary(
+                '/dfs.v1.ControlService/DeleteFile',
+                request_serializer=dfs__pb2.DeleteFileRequest.SerializeToString,
+                response_deserializer=dfs__pb2.Ack.FromString,
+                _registered_method=True)
+        self.ListFiles = channel.unary_unary(
+                '/dfs.v1.ControlService/ListFiles',
+                request_serializer=dfs__pb2.ListFilesRequest.SerializeToString,
+                response_deserializer=dfs__pb2.ListFilesResponse.FromString,
                 _registered_method=True)
 
 
-class DFSServiceServicer(object):
-    """============== SERVIÇOS ==============
-    grpc
+class ControlServiceServicer(object):
+    """=============================================================================
+    CONTROLSERVICE — plano de controle
+    =============================================================================
+
+    Coordena registro, heartbeat, autorização de upload/download e metadados.
+    Não trafega bytes de usuário.
+
+    =============================================================================
+
     """
 
-    def ProcessChunk(self, request, context):
-        """Coordenador implementa: roteia para os nós corretos
-        Nó implementa: executa no disco local
+    def RegisterNode(self, request, context):
+        """Registro e supervisão de nós
+
+        Registra o nó no cluster.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetFileMap(self, request, context):
-        """Permite ao cliente descobrir onde estão os chunks de um arquivo sem que os bytes precisem passar pelo coordenador
-        Fluxo completo do GET refatorado:
-        Cliente -> GetFileMap -> Coordenador devolve FileMap
-        Cliente -> ProcessChunk(op=GET) -> Nó (em paralelo, para cada chunk)
-        Cliente remonta localmente
+    def Heartbeat(self, request, context):
+        """Heartbeat periódico com inventário dos chunks.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RequestUpload(self, request, context):
+        """Autorização de operações de dados
+
+        Inicia um upload e retorna o ingress.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ConfirmUpload(self, request, context):
+        """Confirma o upload e persiste os metadados.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RequestDownload(self, request, context):
+        """Inicia um download e retorna o egress.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteFile(self, request, context):
+        """Operações de controle puras (sem bytes)
+
+        Remove o arquivo e apaga as réplicas.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListFiles(self, request, context):
+        """Lista arquivos conhecidos.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
 
-def add_DFSServiceServicer_to_server(servicer, server):
+def add_ControlServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'ProcessChunk': grpc.unary_unary_rpc_method_handler(
-                    servicer.ProcessChunk,
-                    request_deserializer=dfs__pb2.FileRequest.FromString,
-                    response_serializer=dfs__pb2.FileResponse.SerializeToString,
+            'RegisterNode': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterNode,
+                    request_deserializer=dfs__pb2.RegisterNodeRequest.FromString,
+                    response_serializer=dfs__pb2.RegisterNodeResponse.SerializeToString,
             ),
-            'GetFileMap': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetFileMap,
-                    request_deserializer=dfs__pb2.GetMapRequest.FromString,
-                    response_serializer=dfs__pb2.FileMap.SerializeToString,
+            'Heartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.Heartbeat,
+                    request_deserializer=dfs__pb2.HeartbeatRequest.FromString,
+                    response_serializer=dfs__pb2.HeartbeatResponse.SerializeToString,
+            ),
+            'RequestUpload': grpc.unary_unary_rpc_method_handler(
+                    servicer.RequestUpload,
+                    request_deserializer=dfs__pb2.RequestUploadRequest.FromString,
+                    response_serializer=dfs__pb2.RequestUploadResponse.SerializeToString,
+            ),
+            'ConfirmUpload': grpc.unary_unary_rpc_method_handler(
+                    servicer.ConfirmUpload,
+                    request_deserializer=dfs__pb2.ConfirmUploadRequest.FromString,
+                    response_serializer=dfs__pb2.Ack.SerializeToString,
+            ),
+            'RequestDownload': grpc.unary_unary_rpc_method_handler(
+                    servicer.RequestDownload,
+                    request_deserializer=dfs__pb2.RequestDownloadRequest.FromString,
+                    response_serializer=dfs__pb2.RequestDownloadResponse.SerializeToString,
+            ),
+            'DeleteFile': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteFile,
+                    request_deserializer=dfs__pb2.DeleteFileRequest.FromString,
+                    response_serializer=dfs__pb2.Ack.SerializeToString,
+            ),
+            'ListFiles': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListFiles,
+                    request_deserializer=dfs__pb2.ListFilesRequest.FromString,
+                    response_serializer=dfs__pb2.ListFilesResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'dfs.v1.DFSService', rpc_method_handlers)
+            'dfs.v1.ControlService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('dfs.v1.DFSService', rpc_method_handlers)
+    server.add_registered_method_handlers('dfs.v1.ControlService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class DFSService(object):
-    """============== SERVIÇOS ==============
-    grpc
+class ControlService(object):
+    """=============================================================================
+    CONTROLSERVICE — plano de controle
+    =============================================================================
+
+    Coordena registro, heartbeat, autorização de upload/download e metadados.
+    Não trafega bytes de usuário.
+
+    =============================================================================
+
     """
 
     @staticmethod
-    def ProcessChunk(request,
+    def RegisterNode(request,
             target,
             options=(),
             channel_credentials=None,
@@ -112,9 +219,9 @@ class DFSService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/dfs.v1.DFSService/ProcessChunk',
-            dfs__pb2.FileRequest.SerializeToString,
-            dfs__pb2.FileResponse.FromString,
+            '/dfs.v1.ControlService/RegisterNode',
+            dfs__pb2.RegisterNodeRequest.SerializeToString,
+            dfs__pb2.RegisterNodeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -126,7 +233,7 @@ class DFSService(object):
             _registered_method=True)
 
     @staticmethod
-    def GetFileMap(request,
+    def Heartbeat(request,
             target,
             options=(),
             channel_credentials=None,
@@ -139,9 +246,517 @@ class DFSService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/dfs.v1.DFSService/GetFileMap',
-            dfs__pb2.GetMapRequest.SerializeToString,
-            dfs__pb2.FileMap.FromString,
+            '/dfs.v1.ControlService/Heartbeat',
+            dfs__pb2.HeartbeatRequest.SerializeToString,
+            dfs__pb2.HeartbeatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RequestUpload(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.ControlService/RequestUpload',
+            dfs__pb2.RequestUploadRequest.SerializeToString,
+            dfs__pb2.RequestUploadResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ConfirmUpload(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.ControlService/ConfirmUpload',
+            dfs__pb2.ConfirmUploadRequest.SerializeToString,
+            dfs__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RequestDownload(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.ControlService/RequestDownload',
+            dfs__pb2.RequestDownloadRequest.SerializeToString,
+            dfs__pb2.RequestDownloadResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteFile(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.ControlService/DeleteFile',
+            dfs__pb2.DeleteFileRequest.SerializeToString,
+            dfs__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListFiles(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.ControlService/ListFiles',
+            dfs__pb2.ListFilesRequest.SerializeToString,
+            dfs__pb2.ListFilesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class DataServiceStub(object):
+    """=============================================================================
+    DATASERVICE — plano de dados (interface com a CLI)
+    =============================================================================
+
+    Fica nos nós. A CLI só usa depois de consultar o coordenador.
+    Tudo aqui é streaming para lidar com arquivos grandes.
+
+    =============================================================================
+
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.UploadFile = channel.stream_unary(
+                '/dfs.v1.DataService/UploadFile',
+                request_serializer=dfs__pb2.UploadChunk.SerializeToString,
+                response_deserializer=dfs__pb2.UploadResult.FromString,
+                _registered_method=True)
+        self.DownloadFile = channel.unary_stream(
+                '/dfs.v1.DataService/DownloadFile',
+                request_serializer=dfs__pb2.DownloadStart.SerializeToString,
+                response_deserializer=dfs__pb2.DownloadChunk.FromString,
+                _registered_method=True)
+
+
+class DataServiceServicer(object):
+    """=============================================================================
+    DATASERVICE — plano de dados (interface com a CLI)
+    =============================================================================
+
+    Fica nos nós. A CLI só usa depois de consultar o coordenador.
+    Tudo aqui é streaming para lidar com arquivos grandes.
+
+    =============================================================================
+
+    """
+
+    def UploadFile(self, request_iterator, context):
+        """PUT: a CLI envia UploadChunk e recebe UploadResult no fim.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DownloadFile(self, request, context):
+        """GET: a CLI envia DownloadStart e recebe DownloadChunk em sequência.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_DataServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'UploadFile': grpc.stream_unary_rpc_method_handler(
+                    servicer.UploadFile,
+                    request_deserializer=dfs__pb2.UploadChunk.FromString,
+                    response_serializer=dfs__pb2.UploadResult.SerializeToString,
+            ),
+            'DownloadFile': grpc.unary_stream_rpc_method_handler(
+                    servicer.DownloadFile,
+                    request_deserializer=dfs__pb2.DownloadStart.FromString,
+                    response_serializer=dfs__pb2.DownloadChunk.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'dfs.v1.DataService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('dfs.v1.DataService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class DataService(object):
+    """=============================================================================
+    DATASERVICE — plano de dados (interface com a CLI)
+    =============================================================================
+
+    Fica nos nós. A CLI só usa depois de consultar o coordenador.
+    Tudo aqui é streaming para lidar com arquivos grandes.
+
+    =============================================================================
+
+    """
+
+    @staticmethod
+    def UploadFile(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_unary(
+            request_iterator,
+            target,
+            '/dfs.v1.DataService/UploadFile',
+            dfs__pb2.UploadChunk.SerializeToString,
+            dfs__pb2.UploadResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DownloadFile(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/dfs.v1.DataService/DownloadFile',
+            dfs__pb2.DownloadStart.SerializeToString,
+            dfs__pb2.DownloadChunk.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class ReplicationServiceStub(object):
+    """=============================================================================
+    REPLICATIONSERVICE — comunicação entre nós
+    =============================================================================
+
+    Usado entre nós e pelo coordenador para limpeza/diagnóstico.
+
+    =============================================================================
+
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.StoreChunk = channel.stream_unary(
+                '/dfs.v1.ReplicationService/StoreChunk',
+                request_serializer=dfs__pb2.StoreChunkRequest.SerializeToString,
+                response_deserializer=dfs__pb2.StoreChunkResponse.FromString,
+                _registered_method=True)
+        self.FetchChunk = channel.unary_stream(
+                '/dfs.v1.ReplicationService/FetchChunk',
+                request_serializer=dfs__pb2.FetchChunkRequest.SerializeToString,
+                response_deserializer=dfs__pb2.FetchChunkResponse.FromString,
+                _registered_method=True)
+        self.DeleteChunk = channel.unary_unary(
+                '/dfs.v1.ReplicationService/DeleteChunk',
+                request_serializer=dfs__pb2.DeleteChunkRequest.SerializeToString,
+                response_deserializer=dfs__pb2.Ack.FromString,
+                _registered_method=True)
+        self.ListChunks = channel.unary_unary(
+                '/dfs.v1.ReplicationService/ListChunks',
+                request_serializer=dfs__pb2.ListChunksRequest.SerializeToString,
+                response_deserializer=dfs__pb2.ListChunksResponse.FromString,
+                _registered_method=True)
+
+
+class ReplicationServiceServicer(object):
+    """=============================================================================
+    REPLICATIONSERVICE — comunicação entre nós
+    =============================================================================
+
+    Usado entre nós e pelo coordenador para limpeza/diagnóstico.
+
+    =============================================================================
+
+    """
+
+    def StoreChunk(self, request_iterator, context):
+        """PUT da réplica: recebe um chunk e grava localmente.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def FetchChunk(self, request, context):
+        """GET entre peers: envia um chunk específico.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteChunk(self, request, context):
+        """Apaga um chunk local.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListChunks(self, request, context):
+        """Lista os chunks locais.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_ReplicationServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'StoreChunk': grpc.stream_unary_rpc_method_handler(
+                    servicer.StoreChunk,
+                    request_deserializer=dfs__pb2.StoreChunkRequest.FromString,
+                    response_serializer=dfs__pb2.StoreChunkResponse.SerializeToString,
+            ),
+            'FetchChunk': grpc.unary_stream_rpc_method_handler(
+                    servicer.FetchChunk,
+                    request_deserializer=dfs__pb2.FetchChunkRequest.FromString,
+                    response_serializer=dfs__pb2.FetchChunkResponse.SerializeToString,
+            ),
+            'DeleteChunk': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteChunk,
+                    request_deserializer=dfs__pb2.DeleteChunkRequest.FromString,
+                    response_serializer=dfs__pb2.Ack.SerializeToString,
+            ),
+            'ListChunks': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListChunks,
+                    request_deserializer=dfs__pb2.ListChunksRequest.FromString,
+                    response_serializer=dfs__pb2.ListChunksResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'dfs.v1.ReplicationService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('dfs.v1.ReplicationService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class ReplicationService(object):
+    """=============================================================================
+    REPLICATIONSERVICE — comunicação entre nós
+    =============================================================================
+
+    Usado entre nós e pelo coordenador para limpeza/diagnóstico.
+
+    =============================================================================
+
+    """
+
+    @staticmethod
+    def StoreChunk(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_unary(
+            request_iterator,
+            target,
+            '/dfs.v1.ReplicationService/StoreChunk',
+            dfs__pb2.StoreChunkRequest.SerializeToString,
+            dfs__pb2.StoreChunkResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FetchChunk(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/dfs.v1.ReplicationService/FetchChunk',
+            dfs__pb2.FetchChunkRequest.SerializeToString,
+            dfs__pb2.FetchChunkResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteChunk(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.ReplicationService/DeleteChunk',
+            dfs__pb2.DeleteChunkRequest.SerializeToString,
+            dfs__pb2.Ack.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListChunks(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.ReplicationService/ListChunks',
+            dfs__pb2.ListChunksRequest.SerializeToString,
+            dfs__pb2.ListChunksResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -1,77 +1,320 @@
 syntax = "proto3";
+
 package dfs.v1;
 
-// ============== METADADOS ==============
+// =============================================================================
+// MENSAGENS COMUNS (usadas por mais de um serviço)
+// =============================================================================
 
-// Descreve UM chunk específico e onde ele vive no cluster
-// É a unidade básica do "mapa do arquivo" que o coordenador devolve quando o cliente pergunta "onde estão os pedaços de docs/teste.txt?"
-message ChunkLocation {
-  int32 chunk_id = 1;
-  int64 size = 2; // Tamanho em bytes do conteúdo deste chunk
-  repeated ReplicaInfo replicas = 3; // Lista de TODAS as réplicas onde este chunk está armazenado
-}
-
-// Descreve UMA réplica específica de um chunk: onde encontrá-la na rede e qual é o caminho físico dela no disco do nó
-// É essa estrutura que permite o cliente se conectar DIRETAMENTE aos nós, sem passar pelo coordenador (resolve o gargalo no coordenador)
-message ReplicaInfo {
+// Identifica um nó do cluster.
+message NodeRef {
+  // ID lógico do nó. Ex.: "node1".
   string node_id = 1;
-  string host = 2; // Endereço de rede do nó, é o que o cliente usa para abrir o canal gRPC
-  int32 port = 3; // Porta gRPC onde o nó está escutando
-  string chunk_path = 4; // Caminho INTERNO do chunk dentro do disco do nó
+
+  // Endereço gRPC do nó.
+  string host = 2;
+  int32  port = 3;
 }
 
-// O mapa completo do arquivo: tudo que o cliente precisa saber para baixar o arquivo direto dos nós, sem passar bytes pelo coordenador
-message FileMap {
-  string path = 1; // Caminho lógico do arquivo no DFS
-  int64 total_size = 2; // Usado para validação final, depois de remontar, o cliente confere se o arquivo gerado tem o mesmo tamanho que o esperado
-  int64 version = 3; // Versão atual do arquivo para consistência
-  repeated ChunkLocation chunks = 4; // Lista completa dos chunks do arquivo
+// Resposta genérica para RPCs simples de sucesso/erro.
+message Ack {
+  bool   ok      = 1;
+  string message = 2;  // Mensagem de sucesso ou erro.
 }
 
-// ============== REQUESTS/RESPONSES ==============
-// Mensagem enviada do cliente para o coordenador ou para um nó do cluster.
-message FileRequest {
-  string op = 1; // Operação desejada: PUT, GET, LIST, DELETE
-  string path = 2; // Caminho lógico do arquivo no DFS
-  bytes data = 3; // Conteúdo binário do arquivo, quando aplicável
-
-  string node_id = 4; // Identificador do nó associado à operação
-  int32 shard_id = 5; // Identificador do shard responsável pelo arquivo
-
-  int64 version = 6; // Versão lógica do arquivo no momento desta escrita e incrementado a cada PUT
-  int64 timestamp = 7; // Timestamp em nanosegundoso momento da escrita e serve como tie-breaker se duas escritas tiverem a mesma versão
+// Status atribuído pelo coordenador com base nos heartbeats.
+enum NodeStatus {
+  NODE_STATUS_UNKNOWN = 0;  // Default.
+  NODE_STATUS_ALIVE   = 1;  // Heartbeat recente.
+  NODE_STATUS_SUSPECT = 2;  // Atrasado, mas não morto.
+  NODE_STATUS_DEAD    = 3;  // Sem heartbeat há tempo suficiente.
 }
 
-// Mensagem enviada pelo coordenador ou por um nó ao cliente.
-message FileResponse {
-  bool ok = 1; // Indica se a operação deu certo
-  string message = 2; // Mensagem textual de retorno
-  bytes data = 3; // Conteúdo retornado em GET
-  repeated string entries = 4; // Lista de arquivos retornada em LIST
+// =============================================================================
+// CONTROLSERVICE — plano de controle
+// =============================================================================
+//
+// Coordena registro, heartbeat, autorização de upload/download e metadados.
+// Não trafega bytes de usuário.
+//
+// =============================================================================
 
-  string node_id = 5;  // Nó que atendeu a requisição
-  int32 shard_id = 6; // Shard associado à operação
+service ControlService {
 
-  int64 version = 7; // Versão do chunk que a réplica devolveu
-  int64 timestamp = 8; // Timestamp gravado junto com o chunk na hora da escrita
+  // Registro e supervisão de nós
+
+  // Registra o nó no cluster.
+  rpc RegisterNode (RegisterNodeRequest) returns (RegisterNodeResponse);
+
+  // Heartbeat periódico com inventário dos chunks.
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Autorização de operações de dados
+
+  // Inicia um upload e retorna o ingress.
+  rpc RequestUpload (RequestUploadRequest) returns (RequestUploadResponse);
+
+  // Confirma o upload e persiste os metadados.
+  rpc ConfirmUpload (ConfirmUploadRequest) returns (Ack);
+
+  // Inicia um download e retorna o egress.
+  rpc RequestDownload (RequestDownloadRequest) returns (RequestDownloadResponse);
+
+  // Operações de controle puras (sem bytes)
+
+  // Remove o arquivo e apaga as réplicas.
+  rpc DeleteFile (DeleteFileRequest) returns (Ack);
+
+  // Lista arquivos conhecidos.
+  rpc ListFiles (ListFilesRequest) returns (ListFilesResponse);
 }
 
-// Pedido enxuto usado APENAS pelo novo fluxo do GET, com o coordenador indicando onde cada chunk está, e o cliente assume daqui em diante
-message GetMapRequest {
-  string path = 1;
+// ---------- Mensagens do ControlService ----------
+
+message RegisterNodeRequest {
+  // Nó e endereço de escuta.
+  NodeRef node = 1;
+
+  // Espaço livre em bytes.
+  int64 free_space_bytes = 2;
 }
 
-// ============== SERVIÇOS ==============
-// grpc
-service DFSService {
-    // Coordenador implementa: roteia para os nós corretos
-    // Nó implementa: executa no disco local
-    rpc ProcessChunk (FileRequest) returns (FileResponse);
+message RegisterNodeResponse {
+  bool   ok      = 1;
+  string message = 2;
 
-    // Permite ao cliente descobrir onde estão os chunks de um arquivo sem que os bytes precisem passar pelo coordenador
-    // Fluxo completo do GET refatorado:
-    //   Cliente -> GetFileMap -> Coordenador devolve FileMap
-    //   Cliente -> ProcessChunk(op=GET) -> Nó (em paralelo, para cada chunk)
-    //   Cliente remonta localmente
-    rpc GetFileMap (GetMapRequest) returns (FileMap);
+  // Parâmetros do cluster.
+  int32 cluster_node_count       = 3;
+  int32 replication_factor       = 4;
+  int64 chunk_size_bytes         = 5;
+  int32 heartbeat_interval_secs  = 6;
+}
+
+message HeartbeatRequest {
+  // ID do nó que enviou o heartbeat.
+  string node_id = 1;
+
+  // Espaço livre atualizado.
+  int64 free_space_bytes = 2;
+
+  // Carga atual do nó.
+  int32 active_uploads   = 3;
+  int32 active_downloads = 4;
+
+  // Block report com os chunks locais.
+  repeated string chunk_ids = 5;
+}
+
+message HeartbeatResponse {
+  bool ok = 1;
+
+  // Chunks órfãos para apagar.
+  repeated string chunks_to_delete = 2;
+}
+
+message RequestUploadRequest {
+  // Caminho lógico do arquivo.
+  string logical_path = 1;
+
+  // Tamanho total do arquivo.
+  int64 total_size_bytes = 2;
+
+  // ID do cliente para deduplicação.
+  string client_request_id = 3;
+}
+
+message RequestUploadResponse {
+  bool   ok      = 1;
+  string message = 2;
+
+  // Token do upload.
+  string upload_id = 3;
+
+  // Nó ingress do arquivo.
+  NodeRef ingress = 4;
+}
+
+message ChunkPlacement {
+  // ID estável do chunk.
+  string chunk_id = 1;
+
+  // Índice do chunk no arquivo.
+  int32 chunk_index = 2;
+
+  // Tamanho efetivo do chunk.
+  int64 size_bytes = 3;
+
+  // Réplicas armazenadas.
+  repeated NodeRef replicas = 4;
+}
+
+message ConfirmUploadRequest {
+  // Liga a confirmação ao upload original.
+  string upload_id = 1;
+
+  // Chunks efetivamente armazenados.
+  repeated ChunkPlacement chunks = 2;
+
+  // Tamanho total gravado.
+  int64 total_size_bytes = 3;
+}
+
+message RequestDownloadRequest {
+  string logical_path = 1;
+  string client_request_id = 2;  // Dedup do download.
+}
+
+message RequestDownloadResponse {
+  bool   ok      = 1;
+  string message = 2;
+
+  // Token do download.
+  string download_id = 3;
+
+  // Nó egress do arquivo.
+  NodeRef egress = 4;
+
+  // Tamanho total esperado.
+  int64 total_size_bytes = 5;
+}
+
+message DeleteFileRequest {
+  string logical_path = 1;
+}
+
+message ListFilesRequest {
+  // Reservado para filtros futuros.
+}
+
+message FileEntry {
+  string logical_path     = 1;
+  int64  total_size_bytes = 2;
+  int32  chunk_count      = 3;
+
+  // Nós que possuem ao menos um chunk.
+  repeated string nodes_used = 4;
+}
+
+message ListFilesResponse {
+  repeated FileEntry files = 1;
+}
+
+// =============================================================================
+// DATASERVICE — plano de dados (interface com a CLI)
+// =============================================================================
+//
+// Fica nos nós. A CLI só usa depois de consultar o coordenador.
+// Tudo aqui é streaming para lidar com arquivos grandes.
+//
+// =============================================================================
+
+service DataService {
+
+  // PUT: a CLI envia UploadChunk e recebe UploadResult no fim.
+  rpc UploadFile (stream UploadChunk) returns (UploadResult);
+
+  // GET: a CLI envia DownloadStart e recebe DownloadChunk em sequência.
+  rpc DownloadFile (DownloadStart) returns (stream DownloadChunk);
+}
+
+// ---------- Mensagens do DataService ----------
+
+message UploadChunk {
+  // Token de autorização do upload.
+  string upload_id = 1;
+
+  // Bytes do arquivo.
+  bytes data = 2;
+}
+
+message UploadResult {
+  bool   ok      = 1;
+  string message = 2;
+
+  // Resultado do upload e contagem final.
+  int32 chunks_written = 3;
+  int64 total_bytes_written = 4;
+}
+
+message DownloadStart {
+  // Token de autorização do download.
+  string download_id = 1;
+}
+
+message DownloadChunk {
+  // Bytes do arquivo em ordem.
+  bytes data = 1;
+
+  // Marca opcional de último chunk.
+  bool is_last = 2;
+}
+
+// =============================================================================
+// REPLICATIONSERVICE — comunicação entre nós
+// =============================================================================
+//
+// Usado entre nós e pelo coordenador para limpeza/diagnóstico.
+//
+// =============================================================================
+
+service ReplicationService {
+
+  // PUT da réplica: recebe um chunk e grava localmente.
+  rpc StoreChunk (stream StoreChunkRequest) returns (StoreChunkResponse);
+
+  // GET entre peers: envia um chunk específico.
+  rpc FetchChunk (FetchChunkRequest) returns (stream FetchChunkResponse);
+
+  // Apaga um chunk local.
+  rpc DeleteChunk (DeleteChunkRequest) returns (Ack);
+
+  // Lista os chunks locais.
+  rpc ListChunks (ListChunksRequest) returns (ListChunksResponse);
+}
+
+// ---------- Mensagens do ReplicationService ----------
+
+message StoreChunkRequest {
+  // Primeira mensagem traz metadados; as demais, só bytes.
+
+  string chunk_id    = 1;  // ID estável do chunk.
+  int32  chunk_index = 2;  // Índice do chunk.
+  string upload_id   = 3;  // Upload relacionado.
+  string origin_node_id = 4;  // Nó de origem.
+
+  // Bytes do chunk.
+  bytes data = 5;
+}
+
+message StoreChunkResponse {
+  bool   ok      = 1;
+  string message = 2;
+
+  // Total gravado.
+  int64 bytes_written = 3;
+}
+
+message FetchChunkRequest {
+  string chunk_id = 1;
+
+  // Nó que fez a requisição.
+  string origin_node_id = 2;
+}
+
+message FetchChunkResponse {
+  // Bytes do chunk.
+  bytes data = 1;
+}
+
+message DeleteChunkRequest {
+  string chunk_id = 1;
+}
+
+message ListChunksRequest {
+  // Reservado para filtros futuros.
+}
+
+message ListChunksResponse {
+  // Chunks armazenados neste nó.
+  repeated string chunk_ids = 1;
 }
