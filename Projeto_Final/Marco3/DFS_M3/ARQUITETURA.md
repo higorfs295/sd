@@ -156,19 +156,47 @@ Por localidade: o nó com mais chunks do arquivo. Empate desempatado por carga
 
 ## 8. Parâmetros do cluster
 
-| Parâmetro | Valor | Origem |
+Valores reais lidos de `dfs/config.py`. Onde houver divergência com o design,
+está anotado como pendência.
+
+| Parâmetro | Valor atual (config.py) | Observação |
 |---|---|---|
-| N (nós) | 5 | config |
-| R (replicação) | 3 | config |
-| `CHUNK_SIZE` (chunk oficial do DFS) | **A DEFINIR** (sugestão do doc: 4 MB) | config / `RegisterNodeResponse` |
-| Pedaço de transporte do stream | ~64 KB | CLI |
-| Intervalo de heartbeat | 2 s | config |
-| Timeout SUSPECT / DEAD | 6 s / 15 s | coordenador |
-| Portas dos nós | **A PREENCHER** (ex.: 9101–9105) | config |
+| N (nós) — `NODE_COUNT` | **5** | ⚠️ Ver pendência P1 abaixo. Design assume 5. |
+| R (replicação) | 3 | constante de design (R=3) |
+| `CHUNK_SIZE` | 64 KB (`64 * 1024`) | ⚠️ Ver pendência P2 abaixo. |
+| Porta do coordenador — `PORT` | 9100 | `127.0.0.1:9100` |
+| Porta base dos nós — `BASE_NODE_PORT` | 9101 | node1→9101, node2→9102, node3→9103, ... |
+| Diretório de dados — `DATA_DIR` | `BASE_DIR/data` | nós em `data/nodes/nodeN/` |
+| Metadados | `data/metadata/metadata_index.json` | |
+| Intervalo de heartbeat | 2 s | design (a implementar) |
+| Timeout SUSPECT / DEAD | 6 s / 15 s | design (a implementar) |
 
-> `CHUNK_SIZE` (chunk oficial) ≠ pedaço de transporte do stream. O ingress
-> re-agrupa os pedaços de transporte em chunks oficiais conforme os bytes chegam.
+### ⚠️ P1 — Número de nós: config tem N=3, design assume N=5
+O `config.py` está com `NODE_COUNT = 3`, mas o `.proto`, o `placement.py` e este
+documento foram escritos para **N=5, R=3**. Isso importa porque:
+- com N=3 e R=3, `replicas_for_chunk` retorna `min(R,N)=3` réplicas = **todos os
+  nós para todo chunk**. Não há distribuição — o placement vira degenerado.
+- o Marco 3 tem foco em **balanceamento**; com N=3/R=3 não há o que balancear.
 
+**Decisão pendente:** subir `NODE_COUNT` para 5. Afeta os dois planos (o
+coordenador também lê `NODE_COUNT`), então fechar junto com a Vitória.
+> Atenção do próprio config: mudar `NODE_COUNT` com dados já em disco pode tornar
+> arquivos antigos inacessíveis. Apagar `data/` antes de mudar.
+
+### ⚠️ P2 — CHUNK_SIZE: um valor só vs. dois valores (PENDENTE)
+Hoje o config tem um único `CHUNK_SIZE = 64 KB`, herdado do Marco 2. No modelo
+gateway novo há **duas** granularidades distintas:
+- **chunk oficial do DFS** — unidade de placement e replicação;
+- **pedaço de transporte do stream** — quanto a CLI manda por mensagem gRPC.
+
+Com um valor só (64 KB como chunk oficial), arquivos de poucos MB viram centenas
+de chunks, cada um replicado 3x — muito overhead de metadados e de chamadas
+`StoreChunk`. A alternativa é separar em dois valores no config (ex.:
+`CHUNK_SIZE = 4 MB` oficial + `STREAM_PIECE_SIZE = 64 KB` transporte).
+
+**Decisão pendente:** definir se fica um valor ou dois, e quais. O ingress
+(`handle_upload_stream`) re-agrupa os pedaços de transporte em chunks oficiais —
+o código precisa saber qual constante é qual.
 ---
 
 ## 9. Geração dos stubs gRPC
