@@ -92,20 +92,11 @@ canônica (os 5), na mesma ordem, NUNCA a lista de nós vivos. Liveness afeta de
 qual réplica se lê / se dispara re-replicação — nunca a fórmula. As funções
 aceitam `cluster_size` para validar isso e falhar alto se divergir.
 
-### Designação de ingress — A CONFIRMAR (decisão de fronteira)
-Duas opções na mesa, escolher UMA e manter consistente nos dois lados + no `.proto`:
-- **(a) round-robin por arquivo** (`ingress_for_file`): distribui a carga de ser
-  ingress; introduz estado (contador de arquivos no coordenador). **Implementado
-  em `placement.py`.**
-- **(b) primary do chunk 0** (`primary_replica(0, ...)`): stateless, mas concentra
-  todo ingress em N1 (gargalo). **É o que o comentário atual do `.proto` descreve.**
-
-> ⚠️ Hoje `placement.py` faz (a) e o comentário do `.proto` descreve (b).
-> Reconciliar antes da integração: corrigir o comentário do `.proto` se ficar (a).
+### Designação de ingress
+- **Round-Robin por arquivo** (`ingress_for_file`): distribui a carga de ser ingress; introduz estado (contador de arquivos no coordenador). **Implementado em `placement.py`.**
 
 ### Designação de egress
-Por localidade: o nó com mais chunks do arquivo. Empate desempatado por carga
-(`active_downloads`).
+Por localidade: o nó com mais chunks do arquivo. Empate desempatado por carga (`active_downloads`).
 
 ---
 
@@ -252,21 +243,3 @@ Cada lado testa isolado com um **mock** do outro (em `tests/mocks/`):
 
 Comunicação entre os planos APENAS via: o `.proto`, a regra de placement
 (`comum/placement.py`) e os IDs (`upload_id`, `download_id`, `chunk_id`).
-
----
-
-## 12. Decisões de fronteira em aberto — A FECHAR ANTES DA INTEGRAÇÃO
-
-Decisões que tocam os DOIS planos e/ou o `.proto`; resolver juntos:
-
-1. **Placement de ingress:** round-robin por arquivo (a) vs primary do chunk 0 (b).
-   Ver §5. Reconciliar com o comentário do `.proto`.
-
-2. **Egress precisa da lista de chunks do arquivo.** Hoje `RequestDownloadResponse`
-   só devolve `egress` e `total_size`, não a lista de chunks. Decidir: o egress
-   pergunta ao coordenador, ou o `RequestDownload` passa a devolver a lista?
-   **Pode exigir mudança no `.proto`.**
-
-3. **Ingress → coordenador (`ConfirmUpload`).** A mensagem já existe no `.proto`;
-   falta decidir COMO o nó-ingress obtém o stub/endereço do coordenador
-   (config fixa? vem no `RegisterNodeResponse`?).
