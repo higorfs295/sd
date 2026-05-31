@@ -169,8 +169,8 @@ documento foram escritos para **N=5, R=3**. Isso importa porque:
   nós para todo chunk**. Não há distribuição — o placement vira degenerado.
 - o Marco 3 tem foco em **balanceamento**; com N=3/R=3 não há o que balancear.
 
-**Decisão pendente:** subir `NODE_COUNT` para 5. Afeta os dois planos (o
-coordenador também lê `NODE_COUNT`), então fechar junto com a Vitória.
+**Decisão:** subir `NODE_COUNT` para 5. Afeta os dois planos (o
+coordenador também lê `NODE_COUNT`).
 > Atenção do próprio config: mudar `NODE_COUNT` com dados já em disco pode tornar
 > arquivos antigos inacessíveis. Apagar `data/` antes de mudar.
 
@@ -217,15 +217,41 @@ editar o `.proto` e regenerar.
 ---
 
 ## 10. Estrutura de pastas
-dfs/
-proto/        # .proto files (fonte de verdade dos contratos)
-coordenador/  # módulo do coordenador (ControlService)
-no/           # módulo do nó (DataService + ReplicationService)
-cliente/      # módulo da CLI
-comum/        # código compartilhado (stubs gerados, placement.py, utils)
-scripts/      # iniciar cluster, etc.
-ARQUITETURA.md
-README.md
+DFS_M3/                          # raiz do projeto (rodar protoc e testes daqui)
+├── dfs/                         # pacote principal
+│   ├── application/             # lógica de negócio (regras; sem detalhe de rede)
+│   │   ├── file_service.py      # lógica do coordenador (legado, em migração)
+│   │   ├── metadata_service.py  # índice de arquivos persistido em JSON
+│   │   └── node_service.py      # lógica do nó (serviço legado DFSService)
+│   ├── cluster/                 # infraestrutura de cluster compartilhada
+│   │   ├── node_client.py       # cliente gRPC do coordenador para os nós
+│   │   ├── node_registry.py     # catálogo de nós (evoluir p/ registro dinâmico)
+│   │   ├── placement.py         # round-robin determinístico (fonte de verdade)
+│   │   └── sharding.py          # hash-based legado (remover quando file_service largar)
+│   ├── interface/               # adaptadores gRPC + pontos de entrada de processo
+│   │   ├── cli.py               # cliente de linha de comando
+│   │   ├── server.py            # COORDENADOR: DFSService (legado) + ControlService (novo)
+│   │   └── storage_node.py      # NÓ: DataService + ReplicationService
+│   ├── pb/                      # contrato gRPC e stubs gerados
+│   │   ├── dfs.proto            # ÚNICA fonte de verdade dos contratos
+│   │   ├── dfs.proto.copy       # Cópia do dfs.proto mais comentada para consulta
+│   │   ├── dfs_pb2.py           # gerado pelo protoc — não editar à mão
+│   │   └── dfs_pb2_grpc.py      # gerado pelo protoc — não editar à mão
+│   ├── storage/                 # persistência física em disco
+│   │   └── local_storage.py
+│   ├── __main__.py
+│   ├── client.py
+│   └── config.py                # N=5, R=3, portas, CHUNK_SIZE
+├── scripts/                     # utilitários
+│   └── start_coordinator.py       # Sobe o coordenador
+├── tests/                       # testes e auxiliares
+│   ├── mocks/
+│   │   └── mock_node.py         # (CRIAR no passo 4) nó falso p/ testar o controle
+│   ├── test_list_files.py       # (CRIAR) teste manual do ControlService.ListFiles
+│   └── testes_grpc.py           # Teste com a migração do sistema para gRPC
+├── ARQUITETURA.md
+├── pyproject.toml
+└── requirements.txt
 
 ---
 
