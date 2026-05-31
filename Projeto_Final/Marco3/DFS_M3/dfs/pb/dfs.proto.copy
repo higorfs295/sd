@@ -21,19 +21,18 @@
 // Estratégia de placement (round-robin determinístico por índice de chunk,
 // com N = 5 nós):
 //   chunk i tem réplicas em [N((i+0) % 5), N((i+1) % 5), N((i+2) % 5)]
-// O primeiro nó da lista é também o INGRESS quando o chunk é gravado pela
-// primeira vez. Como a regra é determinística, qualquer componente do sistema
-// pode calcular o placement de um chunk apenas a partir do seu índice — não
-// é necessário persistir essa informação separadamente.
+// O ingress de um arquivo é escolhido por round-robin entre arquivos (função ingress_for_file em dfs/cluster/placement.py),
+// garantindo distribuição da carga de uploads entre os nós ao longo do tempo.
+// O ingress NÃO é necessariamente a primeira réplica do chunk 0.
+// Como a regra é determinística, qualquer componente do sistema pode calcular o placement de um chunk apenas a partir do seu índice.
 //
-// Modelo de operação (gateway, decisão A.3 + B.2):
+// Modelo de operação (gateway):
 //   - PUT: cliente envia o arquivo inteiro, em stream, para UM nó (ingress).
 //          O ingress fatia em chunks e replica em paralelo para as outras
 //          duas réplicas de cada chunk, segundo a regra round-robin.
 //   - GET: cliente pede o arquivo, em stream, a UM nó (egress). O egress
 //          junta os chunks (locais + buscas em peers) e devolve em ordem.
-//   - O coordenador NÃO toca em bytes. Só decide quem é o ingress/egress
-//          e persiste metadados.
+//   - O coordenador NÃO toca em bytes. Só decide quem é o ingress/egress e persiste metadados.
 //
 // -----------------------------------------------------------------------------
 // SEPARAÇÃO EM TRÊS SERVIÇOS
@@ -239,10 +238,10 @@ message RequestUploadResponse {
   // mensagens (CLI→coord, CLI→ingress, ingress→coord).
   string upload_id = 3;
 
-  // O nó que vai receber o stream da CLI. Esse nó é também a primeira
-  // réplica do chunk 0 (regra round-robin), e por convenção atua como
-  // ingress de TODO o arquivo (não só do chunk 0). Ver comentário no
-  // topo do arquivo sobre "ingress por arquivo".
+  // O nó que vai receber o stream da CLI. Escolhido por round-robin
+  // entre arquivos (ingress_for_file), para distribuir a carga de
+  // receber uploads entre os nós ao longo do tempo. Atua como
+  // ingress de TODO o arquivo.
   NodeRef ingress = 4;
 }
 
@@ -302,6 +301,10 @@ message RequestDownloadResponse {
 
   // Tamanho total esperado, para a CLI saber quando parar de ler.
   int64 total_size_bytes = 5;
+
+  // Mapa completo de chunks do arquivo.
+  // O egress usa para saber quais chunks buscar e em quais nós, sem precisar consultar o coordenador uma segunda vez.
+  repeated ChunkPlacement chunks = 6;
 }
 
 message DeleteFileRequest {
