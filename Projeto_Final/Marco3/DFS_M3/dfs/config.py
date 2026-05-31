@@ -83,3 +83,16 @@ NODE_ORDER = tuple(NODES.keys())
 # Quantidade total de shards
 # No Marco 2, o mais simples é ter um shard por nó
 TOTAL_SHARDS = len(NODE_ORDER)
+
+# Parâmetros do plano de controle (Marco 3)
+# Lidos pelo coordenador para supervisionar os nós via heartbeat, e enviados aos nós no registro (RegisterNodeResponse) para que todos usem os mesmos valores.
+# Os tempos abaixo são múltiplos do intervalo de heartbeat: toleram algumas perdas de batimento antes de reagir, equilibrando rapidez de detecção contra falso positivo.
+
+# Intervalo esperado entre heartbeats de cada nó, em segundos.
+HEARTBEAT_INTERVAL_SECS = 2
+
+# Silêncio (sem heartbeat) a partir do qual o nó é reclassificado:
+#  - entre SUSPECT e DEAD: SUSPECT (atrasado; ~3 batimentos perdidos)
+#  - >= DEAD: DEAD (considerado fora do ar; ~7 batimentos perdidos)
+HEARTBEAT_SUSPECT_SECS = 6
+HEARTBEAT_DEAD_SECS = 15

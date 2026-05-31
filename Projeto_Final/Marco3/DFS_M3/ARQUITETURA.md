@@ -243,12 +243,12 @@ DFS_M3/                          # raiz do projeto (rodar protoc e testes daqui)
 │   ├── client.py
 │   └── config.py                # N=5, R=3, portas, CHUNK_SIZE
 ├── scripts/                     # utilitários
-│   └── start_coordinator.py       # Sobe o coordenador
+│   └── start_coordinator.py     # sobe o coordenador
 ├── tests/                       # testes e auxiliares
 │   ├── mocks/
 │   │   └── mock_node.py         # (CRIAR no passo 4) nó falso p/ testar o controle
 │   ├── test_list_files.py       # (CRIAR) teste manual do ControlService.ListFiles
-│   └── testes_grpc.py           # Teste com a migração do sistema para gRPC
+│   └── testes_grpc.py           # teste com a migração do sistema para gRPC
 ├── ARQUITETURA.md
 ├── pyproject.toml
 └── requirements.txt

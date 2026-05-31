@@ -238,6 +238,7 @@ message FileEntry {
 }
 
 message ListFilesResponse {
+  // Lista de arquivos conhecidos pelo coordenador, com metadados básicos.
   repeated FileEntry files = 1;
 }
 
