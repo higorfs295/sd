@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
 DFS_DIR = ROOT_DIR / "DFS_M3"
 
-# Adiciona DFS_M2/ ao sys.path para que este script consiga importar o pacote 'dfs'
+# Adiciona DFS_M3/ ao sys.path para que este script consiga importar o pacote 'dfs'
 # Precisa vir ANTES do import de dfs.config
 sys.path.insert(0, str(DFS_DIR))
 
@@ -48,7 +48,7 @@ def start_process(
 
 def main() -> None:
     """
-    Sobe os três nós e o coordenador do DFS
+    Sobe os 5 nós e o coordenador do DFS
     """
     if not DFS_DIR.exists():
         print(f"Erro: pasta não encontrada: {DFS_DIR}")

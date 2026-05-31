@@ -25,3 +25,16 @@ __pycache__/
 # dados distribuídos (todos os níveis)
 data/
 **/data/
+
+
+# ─── Telemetria do observer — logs isolados por dev ───────────────────────────
+observer/logs_auditoria/
+RELATORIO_FINAL_MARCO3.md
+
+# ─── Estado mutável do cluster (não versionar dados de runtime) ───────────────
+DFS_M3/data/nodes/node*/
+DFS_M3/data/metadata/metadata_index.json
+
+# ─── Stubs gerados pelo compilador protoc (regenerar localmente) ──────────────
+DFS_M3/dfs/pb/dfs_pb2.py
+DFS_M3/dfs/pb/dfs_pb2_grpc.py
