@@ -44,7 +44,7 @@ STORAGE_DIR = DATA_DIR / "storage"
 # As portas e os diretórios são alocados automaticamente a partir dos valores BASE_NODE_PORT e DATA_DIR.
 # IMPORTANTE: ao mudar este valor com dados já gravados em disco, os arquivos antigos podem ficar inacessíveis (porque o hash do sharding redistribui as posições)
 # Recomenda-se apagar a pasta 'data/' antes de mudar o número de nós
-NODE_COUNT = 3
+NODE_COUNT = 5
 
 # Porta do primeiro nó
 # A regra de alocação é: node1 -> 9101, node2 -> 9102, node3 -> 9103, ...
