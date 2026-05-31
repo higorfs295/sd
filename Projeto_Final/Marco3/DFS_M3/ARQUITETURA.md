@@ -92,20 +92,11 @@ canônica (os 5), na mesma ordem, NUNCA a lista de nós vivos. Liveness afeta de
 qual réplica se lê / se dispara re-replicação — nunca a fórmula. As funções
 aceitam `cluster_size` para validar isso e falhar alto se divergir.
 
-### Designação de ingress — A CONFIRMAR (decisão de fronteira)
-Duas opções na mesa, escolher UMA e manter consistente nos dois lados + no `.proto`:
-- **(a) round-robin por arquivo** (`ingress_for_file`): distribui a carga de ser
-  ingress; introduz estado (contador de arquivos no coordenador). **Implementado
-  em `placement.py`.**
-- **(b) primary do chunk 0** (`primary_replica(0, ...)`): stateless, mas concentra
-  todo ingress em N1 (gargalo). **É o que o comentário atual do `.proto` descreve.**
-
-> ⚠️ Hoje `placement.py` faz (a) e o comentário do `.proto` descreve (b).
-> Reconciliar antes da integração: corrigir o comentário do `.proto` se ficar (a).
+### Designação de ingress
+- **Round-Robin por arquivo** (`ingress_for_file`): distribui a carga de ser ingress; introduz estado (contador de arquivos no coordenador). **Implementado em `placement.py`.**
 
 ### Designação de egress
-Por localidade: o nó com mais chunks do arquivo. Empate desempatado por carga
-(`active_downloads`).
+Por localidade: o nó com mais chunks do arquivo. Empate desempatado por carga (`active_downloads`).
 
 ---
 
@@ -178,8 +169,8 @@ documento foram escritos para **N=5, R=3**. Isso importa porque:
   nós para todo chunk**. Não há distribuição — o placement vira degenerado.
 - o Marco 3 tem foco em **balanceamento**; com N=3/R=3 não há o que balancear.
 
-**Decisão pendente:** subir `NODE_COUNT` para 5. Afeta os dois planos (o
-coordenador também lê `NODE_COUNT`), então fechar junto com a Vitória.
+**Decisão:** subir `NODE_COUNT` para 5. Afeta os dois planos (o
+coordenador também lê `NODE_COUNT`).
 > Atenção do próprio config: mudar `NODE_COUNT` com dados já em disco pode tornar
 > arquivos antigos inacessíveis. Apagar `data/` antes de mudar.
 
@@ -226,15 +217,41 @@ editar o `.proto` e regenerar.
 ---
 
 ## 10. Estrutura de pastas
-dfs/
-proto/        # .proto files (fonte de verdade dos contratos)
-coordenador/  # módulo do coordenador (ControlService)
-no/           # módulo do nó (DataService + ReplicationService)
-cliente/      # módulo da CLI
-comum/        # código compartilhado (stubs gerados, placement.py, utils)
-scripts/      # iniciar cluster, etc.
-ARQUITETURA.md
-README.md
+DFS_M3/                          # raiz do projeto (rodar protoc e testes daqui)
+├── dfs/                         # pacote principal
+│   ├── application/             # lógica de negócio (regras; sem detalhe de rede)
+│   │   ├── file_service.py      # lógica do coordenador (legado, em migração)
+│   │   ├── metadata_service.py  # índice de arquivos persistido em JSON
+│   │   └── node_service.py      # lógica do nó (serviço legado DFSService)
+│   ├── cluster/                 # infraestrutura de cluster compartilhada
+│   │   ├── node_client.py       # cliente gRPC do coordenador para os nós
+│   │   ├── node_registry.py     # catálogo de nós (evoluir p/ registro dinâmico)
+│   │   ├── placement.py         # round-robin determinístico (fonte de verdade)
+│   │   └── sharding.py          # hash-based legado (remover quando file_service largar)
+│   ├── interface/               # adaptadores gRPC + pontos de entrada de processo
+│   │   ├── cli.py               # cliente de linha de comando
+│   │   ├── server.py            # COORDENADOR: DFSService (legado) + ControlService (novo)
+│   │   └── storage_node.py      # NÓ: DataService + ReplicationService
+│   ├── pb/                      # contrato gRPC e stubs gerados
+│   │   ├── dfs.proto            # ÚNICA fonte de verdade dos contratos
+│   │   ├── dfs.proto.copy       # Cópia do dfs.proto mais comentada para consulta
+│   │   ├── dfs_pb2.py           # gerado pelo protoc — não editar à mão
+│   │   └── dfs_pb2_grpc.py      # gerado pelo protoc — não editar à mão
+│   ├── storage/                 # persistência física em disco
+│   │   └── local_storage.py
+│   ├── __main__.py
+│   ├── client.py
+│   └── config.py                # N=5, R=3, portas, CHUNK_SIZE
+├── scripts/                     # utilitários
+│   └── start_coordinator.py       # Sobe o coordenador
+├── tests/                       # testes e auxiliares
+│   ├── mocks/
+│   │   └── mock_node.py         # (CRIAR no passo 4) nó falso p/ testar o controle
+│   ├── test_list_files.py       # (CRIAR) teste manual do ControlService.ListFiles
+│   └── testes_grpc.py           # Teste com a migração do sistema para gRPC
+├── ARQUITETURA.md
+├── pyproject.toml
+└── requirements.txt
 
 ---
 
@@ -252,21 +269,3 @@ Cada lado testa isolado com um **mock** do outro (em `tests/mocks/`):
 
 Comunicação entre os planos APENAS via: o `.proto`, a regra de placement
 (`comum/placement.py`) e os IDs (`upload_id`, `download_id`, `chunk_id`).
-
----
-
-## 12. Decisões de fronteira em aberto — A FECHAR ANTES DA INTEGRAÇÃO
-
-Decisões que tocam os DOIS planos e/ou o `.proto`; resolver juntos:
-
-1. **Placement de ingress:** round-robin por arquivo (a) vs primary do chunk 0 (b).
-   Ver §5. Reconciliar com o comentário do `.proto`.
-
-2. **Egress precisa da lista de chunks do arquivo.** Hoje `RequestDownloadResponse`
-   só devolve `egress` e `total_size`, não a lista de chunks. Decidir: o egress
-   pergunta ao coordenador, ou o `RequestDownload` passa a devolver a lista?
-   **Pode exigir mudança no `.proto`.**
-
-3. **Ingress → coordenador (`ConfirmUpload`).** A mensagem já existe no `.proto`;
-   falta decidir COMO o nó-ingress obtém o stub/endereço do coordenador
-   (config fixa? vem no `RegisterNodeResponse`?).
