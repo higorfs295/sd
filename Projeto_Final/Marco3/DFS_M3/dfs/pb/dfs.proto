@@ -184,6 +184,7 @@ message RequestUploadResponse {
   string upload_id = 3;
   // O nó que vai receber o stream da CLI (ingress do arquivo inteiro).
   NodeRef ingress = 4;
+  repeated ChunkPlacement chunks = 5; // Mapa completo de chunks do arquivo, para o ingress saber onde replicar.
 }
 
 message ChunkPlacement {

@@ -140,6 +140,53 @@ class NodeService:
     # =========================================================================
     # =========================================================================
 
+    # =========================================================================
+    # =========================================================================
+    def handle_upload_fragmentado(self, request_iterator, chunk_size=None):
+        """
+        INCREMENTO 2 do ingress: re-fragmenta o stream em chunks de tamanho
+        oficial e grava CADA chunk localmente. Ainda sem fan-out e sem
+        ConfirmUpload. chunk_size é parametrizável para facilitar o teste
+        (em produção, usa CHUNK_OFICIAL_SIZE do config).
+
+        Retorna (upload_id, lista de (chunk_id, chunk_index, tamanho)).
+        """
+        from dfs.config import CHUNK_OFICIAL_SIZE
+
+        if chunk_size is None:
+            chunk_size = CHUNK_OFICIAL_SIZE
+
+        upload_id = None
+        buffer = bytearray()
+        chunk_index = 0
+        gravados = []  # (chunk_id, chunk_index, tamanho)
+
+        def materializar(corpo):
+            nonlocal chunk_index
+            chunk_id = f"{upload_id}_chunk_{chunk_index}"
+            self.store_chunk(chunk_id, corpo)
+            gravados.append((chunk_id, chunk_index, len(corpo)))
+            chunk_index += 1
+
+        for msg in request_iterator:
+            if msg.upload_id and upload_id is None:
+                upload_id = msg.upload_id
+            if msg.data:
+                buffer.extend(msg.data)
+            # Sempre que acumular um chunk oficial cheio, materializa.
+            while len(buffer) >= chunk_size:
+                corpo = bytes(buffer[:chunk_size])
+                del buffer[:chunk_size]
+                materializar(corpo)
+
+        # O resto do buffer (menor que chunk_size) vira o último chunk.
+        if buffer:
+            materializar(bytes(buffer))
+
+        return upload_id, gravados
+    # =========================================================================
+    # =========================================================================
+
     def handle_upload_stream(self, request_iterator, nodes, cluster_size):
         """
         MODO INGRESS. Recebe o stream de UploadChunk vindo da CLI, re-fragmenta
