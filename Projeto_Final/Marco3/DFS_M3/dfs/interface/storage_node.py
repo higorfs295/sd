@@ -33,23 +33,20 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
 
     def UploadFile(self, request_iterator, context):
         """
-        PUT (client-streaming). Recebe o stream da CLI, delega o trabalho de
-        ingress ao NodeService, responde um único UploadResult.
+        PUT (client-streaming). INCREMENTO 1: grava um chunk local, sem fan-out.
         """
-        # TODO: a lista de nós (membership canônica) e o cluster_size precisam
-        # vir de algum lugar — do NodeRegistry, ou de config. O ingress passa
-        # isso ao placement. Veja o NodeService.handle_upload_stream.
         try:
-            # nodes = ...  (membership canônica dos 5 nós)
-            # placements = self.service.handle_upload_stream(request_iterator, nodes, cluster_size=5)
-            # TODO: após gravar/replicar, o ingress confirma ao coordenador via
-            #       ControlService.ConfirmUpload (cliente gRPC para o coordenador).
-            #       Decisão: quem segura esse stub de cliente do coordenador?
-            raise NotImplementedError("UploadFile: ligar ao handle_upload_stream")
-        except NotImplementedError:
-            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-            context.set_details("Ingress ainda não implementado")
-            return dfs_pb2.UploadResult(ok=False, message="ingress TODO")
+            chunk_id, bytes_gravados = self.service.handle_upload_simples(request_iterator)
+            return dfs_pb2.UploadResult(
+                ok=True,
+                message=f"upload recebido (incremento 1): {chunk_id}",
+                chunks_written=1,
+                total_bytes_written=bytes_gravados,
+            )
+        except Exception as exc:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return dfs_pb2.UploadResult(ok=False, message=str(exc))
 
     def DownloadFile(self, request, context):
         """
@@ -122,18 +119,26 @@ class ReplicationServicer(dfs_pb2_grpc.ReplicationServiceServicer):
             return dfs_pb2.StoreChunkResponse(ok=False, message=str(exc))
 
     def FetchChunk(self, request, context):
-        """
-        GET lado-peer: o egress pede um chunk_id; devolvemos os bytes em stream.
-        """
-        # TODO: ler o chunk local e emitir em pedaços:
-        #   data = self.service.read_chunk(request.chunk_id)
-        #   for i in range(0, len(data), PEDACO):
-        #       yield dfs_pb2.FetchChunkResponse(data=data[i:i+PEDACO])
-        # Tratar chunk inexistente (set_code NOT_FOUND).
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("FetchChunk ainda não implementado")
-        return
-        yield
+            """
+            GET lado-peer: o egress pede um chunk_id; devolvemos os bytes em stream.
+            """
+            try:
+                dados = self.service.read_chunk(request.chunk_id)
+            except FileNotFoundError:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(
+                    f"chunk {request.chunk_id} não existe em {self.service.node_id}"
+                )
+                return
+            except Exception as exc:
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details(str(exc))
+                return
+
+            # Emite os bytes em pedaços de 64 KB para o stream.
+            PEDACO = 64 * 1024
+            for inicio in range(0, len(dados), PEDACO):
+                yield dfs_pb2.FetchChunkResponse(data=dados[inicio:inicio + PEDACO])
 
     def DeleteChunk(self, request, context):
         """

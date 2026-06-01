@@ -20,10 +20,14 @@ PORT = 9100
 COORDINATOR_HOST = HOST
 COORDINATOR_PORT = PORT
 
-# Define o tamanho de cada pedaço físico do arquivo
-# 64 * 1024 bytes = 65536 bytes = 64 KB
-# Permite dividir arquivos em chunks para sharding físico entre nós
+# Pedaço de transporte do stream gRPC (quanto a CLI/ingress manda por mensagem).
+# Mantido em 64 KB — bem abaixo do limite de 4 MB do gRPC.
 CHUNK_SIZE = 64 * 1024
+
+# Tamanho do chunk OFICIAL do DFS (unidade de placement e replicação).
+# 4 MB: poucos chunks por arquivo, sem estourar o limite de mensagem do gRPC.
+# Decisão registrada na pendência P2 do ARQUITETURA.md.
+CHUNK_OFICIAL_SIZE = 4 * 1024 * 1024
 
 # Define a pasta principal de dados do sistema
 DATA_DIR = BASE_DIR / "data"

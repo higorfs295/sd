@@ -113,6 +113,33 @@ class NodeService:
     # está montada, mas as decisões centrais são SUAS e estão marcadas com TODO.
     # =========================================================================
 
+    # =========================================================================
+    # =========================================================================
+    def handle_upload_simples(self, request_iterator):
+        """
+        INCREMENTO 1 do ingress: acumula o stream inteiro e grava como UM chunk
+        local. Sem fragmentação, sem fan-out, sem ConfirmUpload. Só para validar
+        o caminho CLI -> ingress -> disco. Será substituído pelo handle_upload_stream.
+        """
+        # A primeira mensagem traz o upload_id; todas podem trazer bytes.
+        upload_id = None
+        buffer = bytearray()
+
+        for msg in request_iterator:
+            if msg.upload_id and upload_id is None:
+                upload_id = msg.upload_id
+            if msg.data:
+                buffer.extend(msg.data)
+
+        # Por enquanto, um chunk só, com índice 0.
+        chunk_id = f"{upload_id}_chunk_0"
+        bytes_gravados = self.store_chunk(chunk_id, bytes(buffer))
+
+        # Retorna o que o servicer precisa pra montar o UploadResult.
+        return chunk_id, bytes_gravados
+    # =========================================================================
+    # =========================================================================
+
     def handle_upload_stream(self, request_iterator, nodes, cluster_size):
         """
         MODO INGRESS. Recebe o stream de UploadChunk vindo da CLI, re-fragmenta
