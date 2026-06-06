@@ -243,6 +243,10 @@ message RequestUploadResponse {
   // receber uploads entre os nós ao longo do tempo. Atua como
   // ingress de TODO o arquivo.
   NodeRef ingress = 4;
+
+  // Mapa completo de chunks do arquivo, para o ingress saber onde replicar.
+  // O coordenador pré-computa todas as ChunkPlacements com base na membership do MOMENTO do upload. O ingress recebe pronto.
+  repeated ChunkPlacement chunks = 5;
 }
 
 message ChunkPlacement {

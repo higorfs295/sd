@@ -20,10 +20,14 @@ PORT = 9100
 COORDINATOR_HOST = HOST
 COORDINATOR_PORT = PORT
 
-# Define o tamanho de cada pedaço físico do arquivo
-# 64 * 1024 bytes = 65536 bytes = 64 KB
-# Permite dividir arquivos em chunks para sharding físico entre nós
-CHUNK_SIZE = 64 * 1024
+# Tamanho do chunk do DFS: a unidade de placement e replicação.
+# É este valor que define em quantos chunks um arquivo é cortado, e quantas entradas de metadado e quantas rodadas de replicação ele gera.
+CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
+
+# Tamanho do PEDAÇO DE TRANSPORTE do stream: quanto a CLI envia por mensagem gRPC ao subir/baixar um arquivo.
+# NÃO é unidade de placement nem de replicação, é só transporte.
+# Pequeno de propósito: mantém o uso de memória baixo e fica bem abaixo do limite default de mensagem do gRPC (4 MB).
+STREAM_SIZE = 64 * 1024  # 64 KB
 
 # Define a pasta principal de dados do sistema
 DATA_DIR = BASE_DIR / "data"
@@ -83,3 +87,20 @@ NODE_ORDER = tuple(NODES.keys())
 # Quantidade total de shards
 # No Marco 2, o mais simples é ter um shard por nó
 TOTAL_SHARDS = len(NODE_ORDER)
+
+
+"""
+Parâmetros lidos pelo coordenador para supervisionar os nós via heartbeat, e enviados aos nós no registro (RegisterNodeResponse) para que todos usem os mesmos valores.
+Os tempos abaixo são múltiplos do intervalo de heartbeat: toleram algumas perdas de batimento antes de reagir, equilibrando rapidez de detecção contra falso positivo.
+"""
+# Intervalo esperado entre heartbeats de cada nó, em segundos.
+HEARTBEAT_INTERVAL = 2
+
+# Silêncio (sem heartbeat) a partir do qual o nó é reclassificado:
+#  - entre SUSPECT e DEAD: SUSPECT (atrasado; ~2 batimentos perdidos)
+#  - >= DEAD: DEAD (considerado fora do ar; ~4 batimentos perdidos)
+HEARTBEAT_SUSPECT = 4
+HEARTBEAT_DEAD = 8
+
+# Quantidade de réplicas de cada chunk.
+REPLICATION_FACTOR = 3

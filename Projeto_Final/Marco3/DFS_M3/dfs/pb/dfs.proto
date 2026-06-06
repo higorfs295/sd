@@ -147,8 +147,7 @@ message RegisterNodeRequest {
 message RegisterNodeResponse {
   bool ok = 1;
   string message = 2;
-  // Parâmetros do cluster, para garantir que todos os nós estão configurados
-  // igualmente.
+  // Parâmetros do cluster, para garantir que todos os nós estão configurados igualmente.
   int32 cluster_node_count = 3;
   int32 replication_factor = 4;
   int64 chunk_size_bytes = 5;
@@ -184,11 +183,12 @@ message RequestUploadResponse {
   string upload_id = 3;
   // O nó que vai receber o stream da CLI (ingress do arquivo inteiro).
   NodeRef ingress = 4;
-  repeated ChunkPlacement chunks = 5; // Mapa completo de chunks do arquivo, para o ingress saber onde replicar.
+  // Mapa completo de chunks do arquivo, para o ingress saber onde replicar.
+  repeated ChunkPlacement chunks = 5;
 }
 
 message ChunkPlacement {
-  // ID estável do chunk. Sugestão: "<upload_id>_chunk_<índice>".
+  // ID estável do chunk: "<upload_id>_chunk_<índice>".
   string chunk_id = 1;
   // Índice ordinal dentro do arquivo (0, 1, 2, ...). Entra na regra round-robin.
   int32 chunk_index = 2;
@@ -239,6 +239,7 @@ message FileEntry {
 }
 
 message ListFilesResponse {
+  // Lista de arquivos conhecidos pelo coordenador, com metadados básicos.
   repeated FileEntry files = 1;
 }
 
