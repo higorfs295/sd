@@ -49,7 +49,7 @@ class MetadataService:
             data = json.loads(self.metadata_file.read_text(encoding="utf-8"))
             # Garante compatibilidade caso o arquivo antigo não tenha a chave.
             data.setdefault("files", {})
-            
+
             # Limpeza caso exista resquício de 'directories' de versões anteriores no JSON salvo
             if "directories" in data:
                 del data["directories"]
@@ -69,28 +69,33 @@ class MetadataService:
 
     # ARQUIVOS
 
-    # Registra ou atualiza um arquivo no índice
-    # Chamado normalmente depois que o PUT salva todos os chunks nos nós
-    def put_file(self, path: str, size: int, chunks: list[dict]) -> None:
+    def put_file(self, path: str, total_size_bytes: int, chunks: list[dict]) -> None:
         """
-        Registra um arquivo no índice, dentro da seção 'files'
-        Também calcula o resumo de distribuição entre os nós, usado pelo LIST
-        """
-        # Conta quantos chunks ficaram em cada nó. Útil pro list e pro relatório.
-        nodes_used = sorted({c["node_id"] for c in chunks})
+        Registra um arquivo no índice, em que cada chunk tem uma LISTA de réplicas.
+        Cada chunk tem {chunk_id, chunk_index, size_bytes, replicas[]}.
 
-        with self._lock:
-            self._index["files"][path] = (
-                {  # Cria ou substitui a entrada do arquivo no índice
-                    "path": path,
-                    "size": size,
-                    "chunks": chunks,  # Cada chunk é um dicionário com informações sobre onde o chunk está armazenado (chuck_id, node_id, shard_id, cunk_path, size)
-                    "distribution": {
-                        "chunk_count": len(chunks),
-                        "nodes_used": nodes_used,
-                    },
-                }
-            )
+        O parâmetro 'chunks' é uma lista de dicionários.
+        Quem chama (ConfirmUpload) converte os ChunkPlacement do .proto para esses dicionários antes de passar aqui.
+        Assim, o MetadataService não precisa conhecer tipos do protobuf, mantendo a camada de metadados independente do gRPC.
+        """
+        # Junta todos os node_id que aparecem em qualquer réplica de qualquer chunk.
+        # É o que o ListFiles mostra na coluna de nós.
+        # sorted() deixa a ordem estável para o ListFiles exibir de forma previsível.
+        nodes_used = sorted(
+            {node_id for chunk in chunks for node_id in chunk["replicas"]}
+        )
+
+        with self._lock:  # Protege o acesso ao índice para evitar condições de corrida em uploads simultâneos
+            self._index["files"][path] = {
+                "path": path,
+                # Guardamos como total_size_bytes (nome do campo do .proto).
+                "total_size_bytes": total_size_bytes,
+                "chunks": chunks,
+                "distribution": {
+                    "chunk_count": len(chunks),
+                    "nodes_used": nodes_used,
+                },
+            }
             self._save()
 
     # Busca as informações de um arquivo no índice
