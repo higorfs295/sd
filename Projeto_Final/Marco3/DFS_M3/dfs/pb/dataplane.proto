@@ -1,0 +1,69 @@
+// =============================================================================
+// dataplane.proto — Contrato INTERNO do Plano de Dados (handoff CLI -> nó)
+// =============================================================================
+//
+// LOCALIZAÇÃO: dfs/pb/dataplane.proto
+//
+// Por que este arquivo existe (e por que é SEPARADO do dfs.proto):
+//   No contrato compartilhado (dfs.proto), o nó recebe da CLI apenas o token da
+//   operação: UploadChunk{upload_id} no PUT e DownloadStart{download_id} no GET.
+//   Mas o ingress (PUT) precisa saber em quais réplicas gravar cada chunk, e o
+//   egress (GET) precisa saber quais chunks compõem o arquivo e onde estão.
+//   Essa informação (repeated ChunkPlacement) o coordenador devolve à CLI, não
+//   ao nó.
+//
+//   A CLI repassa esse plano ao nó por ESTE serviço, ANTES de abrir o stream de
+//   dados. Mantemos isso fora do dfs.proto de propósito: o handoff do plano é
+//   uma conversa interna do PLANO DE DADOS (CLI <-> nó), não do plano de
+//   controle. Assim o dfs.proto e os stubs do coordenador (Vitória) ficam
+//   intocados.
+//
+//   Quem CALCULA o placement continua sendo o coordenador; quem PERSISTE é o
+//   ConfirmUpload (vindo do ingress, não da CLI). A CLI só TRANSPORTA o plano.
+//
+// FLUXO (PUT; o GET é simétrico):
+//   1. CLI -> Coordenador: RequestUpload  -> (upload_id, ingress, chunks)
+//   2. CLI -> Ingress:     SetUploadPlan(upload_id, total, chunks) -> Ack
+//   3. CLI -> Ingress:     UploadFile(stream)  // ingress busca o plano no mapa
+//
+// COMPILAÇÃO (a partir de DFS_M3/):
+//   python -m grpc_tools.protoc -I=. --python_out=. --grpc_python_out=. \
+//       dfs/pb/dataplane.proto
+//   (o -I=. resolve o import de dfs/pb/dfs.proto; o dataplane_pb2 vai reusar
+//    dfs.v1.ChunkPlacement e dfs.v1.Ack via 'from dfs.pb import dfs_pb2')
+// =============================================================================
+
+syntax = "proto3";
+
+package dfs.dataplane;
+
+// Reusa ChunkPlacement e Ack do contrato compartilhado, sem redefinir nada.
+import "dfs/pb/dfs.proto";
+
+// Serviço INTERNO do plano de dados, exposto pelos NÓS (no mesmo servidor/porta
+// do DataService) e chamado pela CLI imediatamente ANTES de abrir o stream.
+service DataPlaneService {
+  // PUT: a CLI entrega ao ingress o plano do upload antes do UploadFile.
+  rpc SetUploadPlan (UploadPlan) returns (dfs.v1.Ack);
+
+  // GET: a CLI entrega ao egress o plano do download antes do DownloadFile.
+  rpc SetDownloadPlan (DownloadPlan) returns (dfs.v1.Ack);
+}
+
+message UploadPlan {
+  // Token do upload, emitido pelo coordenador em RequestUploadResponse.
+  string upload_id = 1;
+  // Tamanho total do arquivo (informativo; ajuda a validar o nº de chunks).
+  int64 total_size_bytes = 2;
+  // Mapa completo de chunks (mesmos objetos de RequestUploadResponse.chunks).
+  repeated dfs.v1.ChunkPlacement chunks = 3;
+}
+
+message DownloadPlan {
+  // Token do download, emitido pelo coordenador em RequestDownloadResponse.
+  string download_id = 1;
+  // Tamanho total do arquivo (informativo).
+  int64 total_size_bytes = 2;
+  // Mapa completo de chunks (mesmos objetos de RequestDownloadResponse.chunks).
+  repeated dfs.v1.ChunkPlacement chunks = 3;
+}

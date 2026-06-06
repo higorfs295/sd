@@ -1,147 +1,101 @@
+# dfs/storage/local_storage.py
 """
-DESCRIÇÃO GERAL:
-Camada de persistência local utilizada pelos storage nodes.
+Camada de persistência local de um storage node.
 
-Cada nó possui:
-- um diretório raiz próprio;
-- arquivos/chunks físicos;
-- diretórios físicos internos.
+Mantém a API legada (put/get/delete/list_files por caminho lógico) e adiciona a
+API orientada a chunk_id usada pelo plano de dados do Marco 3.
 
-Esta classe abstrai:
-- leitura;
-- escrita;
-- remoção;
-- criação de diretórios;
-- remoção de diretórios.
-
-O coordenador NÃO manipula disco diretamente.
-Tudo passa por esta camada.
+CONVENÇÃO DE NOME DO CHUNK (importante p/ o observer):
+  O chunk_id vem no formato "<upload_id>_chunk_<indice>" (sugestão do .proto).
+  Gravamos o arquivo do chunk com ESSE nome, SEM extensão, em
+  <root>/chunks/<chunk_id>. Assim o nome termina em "_chunk_<N>" e casa com o
+  regex do observer (_chunk_\\d+$). Se algum dia quiser usar extensão (.bin),
+  ajuste o REGEX_CHUNK do observer junto.
 """
+from __future__ import annotations
 
 from pathlib import Path
 
 from dfs.config import STORAGE_DIR
 
+CHUNKS_SUBDIR = "chunks"
+
 
 class LocalStorage:
-    """
-    Implementa o armazenamento local físico de um nó.
-    """
-
     def __init__(self, root: Path | None = None):
-        """
-        Inicializa o storage local.
-        """
-
         self.root = Path(root) if root is not None else STORAGE_DIR
-
-        # Garante existência da raiz física do nó.
         self.root.mkdir(parents=True, exist_ok=True)
 
+    # ------------------------------------------------------------------ legado
     def _resolve_path(self, path: str) -> Path:
-        """
-        Resolve caminhos relativos de forma segura.
-
-        Também protege contra path traversal simples.
-        """
-
         target = (self.root / path).resolve()
-
         root_resolved = self.root.resolve()
-
         if root_resolved not in target.parents and target != root_resolved:
             raise ValueError("Caminho inválido fora da raiz do storage")
-
         return target
 
-    # ============================================================
-    # ARQUIVOS
-    # ============================================================
-
     def put(self, path: str, data: bytes) -> None:
-        """
-        Salva um arquivo físico no nó.
-        """
-
         target = self._resolve_path(path)
-
         target.parent.mkdir(parents=True, exist_ok=True)
-
         target.write_bytes(data)
 
     def get(self, path: str) -> bytes:
-        """
-        Recupera um arquivo físico.
-        """
-
-        target = self._resolve_path(path)
-
-        return target.read_bytes()
+        return self._resolve_path(path).read_bytes()
 
     def delete(self, logical_path: str) -> None:
-        """
-            Remove um chunk do disco local e limpa as pastas vazias que ficaram pra trás, subindo a árvore até a raiz do nó
-
-        Exemplo de estrutura limpa esperada após o último chunk de um arquivo:
-            .chunks/docs_arq_pdf/chunk_000000 -> arquivo removido
-            .chunks/docs_arq_pdf/             -> pasta vazia -> removida
-            .chunks/                          -> pasta vazia -> removida
-        """
-        physical_path = self._resolve_path(logical_path)
-
-        # Remove o arquivo do chunk
-        if physical_path.exists():
-            physical_path.unlink()
-
-        # Sobe a árvore de diretórios removendo pastas vazias, parando quando chegar na raiz do storage (self.root)
-        parent_dir = physical_path.parent
+        physical = self._resolve_path(logical_path)
+        if physical.exists():
+            physical.unlink()
+        parent = physical.parent
         root_resolved = self.root.resolve()
-
-        while True:
-            if parent_dir == root_resolved:
-                break  # Chegou na raiz, para a limpeza
-
-            # Para se a pasta não existe mais (já foi removida antes).
-            if not parent_dir.exists():
-                break
-
-            # Tenta remover. rmdir() só remove diretórios VAZIOS.
-            # Se ainda tiver algum chunk dentro, levanta OSError e paramos.
+        while parent != root_resolved and parent.exists():
             try:
-                parent_dir.rmdir()
+                parent.rmdir()
             except OSError:
-                # Pasta ainda tem conteúdo (outros chunks). Para aqui
                 break
-
-            # Pasta removida com sucesso, sobe um nível.
-            parent_dir = parent_dir.parent
-        # try:
-        #     parent_dir = physical_path.parent
-        #     if parent_dir.exists():
-        #         parent_dir.rmdir()
-
-        #         # 3. Segunda tentativa: Remove a pasta .chunks/ se ela ficou vazia
-        #         # Só chegamos aqui se a pasta do arquivo foi removida com sucesso
-        #         grandparent_dir = parent_dir.parent
-        #         if grandparent_dir.name == ".chunks" and grandparent_dir.exists():
-        #             grandparent_dir.rmdir()
-        # except OSError:
-        #     # Se qualquer uma das pastas ainda tiver conteúdo (outros arquivos ou chunks),
-        #     # o Python ignora e interrompe a limpeza automática naquele nível.
-        #     pass
-
-    # ============================================================
-    # ============================================================
-    # LISTAGEM
-    # ============================================================
+            parent = parent.parent
 
     def list_files(self) -> list[str]:
-        """
-        Lista todos os arquivos físicos armazenados.
-        """
-
         return sorted(
             p.relative_to(self.root).as_posix()
             for p in self.root.rglob("*")
             if p.is_file()
         )
+
+    # ------------------------------------------------------- API por chunk_id
+    def _chunk_path(self, chunk_id: str) -> Path:
+        safe = chunk_id.replace("/", "_").replace("\\", "_")
+        if not safe:
+            raise ValueError("chunk_id vazio")
+        target = (self.root / CHUNKS_SUBDIR / safe).resolve()
+        base = (self.root / CHUNKS_SUBDIR).resolve()
+        if base not in target.parents and target != base:
+            raise ValueError("chunk_id inválido (path traversal)")
+        return target
+
+    def store_chunk(self, chunk_id: str, data: bytes) -> int:
+        """Grava um chunk inteiro no disco local. Retorna bytes gravados."""
+        target = self._chunk_path(chunk_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return len(data)
+
+    def read_chunk(self, chunk_id: str) -> bytes:
+        """Lê um chunk inteiro. Levanta FileNotFoundError se não existir."""
+        return self._chunk_path(chunk_id).read_bytes()
+
+    def has_chunk(self, chunk_id: str) -> bool:
+        return self._chunk_path(chunk_id).exists()
+
+    def delete_chunk(self, chunk_id: str) -> bool:
+        target = self._chunk_path(chunk_id)
+        if target.exists():
+            target.unlink()
+            return True
+        return False
+
+    def list_chunk_ids(self) -> list[str]:
+        base = self.root / CHUNKS_SUBDIR
+        if not base.exists():
+            return []
+        return sorted(p.name for p in base.iterdir() if p.is_file())

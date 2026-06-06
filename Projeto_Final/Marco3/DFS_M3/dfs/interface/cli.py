@@ -1,186 +1,105 @@
+# dfs/interface/cli.py
 """
-DESCRIÇÃO GERAL:
-Interface de linha de comando do DFS adaptada para a arquitetura gRPC.
+CLI do DFS (Marco 3, modelo gateway). Fluxo de duas/três chamadas:
+  put <origem> <caminho_logico>
+  get <caminho_logico> <destino>
+  rm  <caminho_logico>
+  ls
 """
+from __future__ import annotations
 
 import argparse
-import shlex
+import uuid
 from pathlib import Path
 
-from dfs.client import DFSClient
+from dfs.client import ControlClient, DataClient
+
+
+def cmd_put(source: str, logical_path: str) -> int:
+    data = Path(source).read_bytes()
+    ctrl = ControlClient()
+    try:
+        grant = ctrl.request_upload(logical_path, len(data),
+                                    client_request_id=str(uuid.uuid4()))
+        if not grant.ok:
+            print(f"RequestUpload falhou: {grant.message}")
+            return 1
+        dc = DataClient(grant.ingress.host, grant.ingress.port)
+        try:
+            dc.set_upload_plan(grant.upload_id, len(data), grant.chunks)
+            res = dc.upload(grant.upload_id, data)
+        finally:
+            dc.close()
+        print(res.message if res.ok else f"upload falhou: {res.message}")
+        return 0 if res.ok else 1
+    finally:
+        ctrl.close()
+
+
+def cmd_get(logical_path: str, dest: str) -> int:
+    ctrl = ControlClient()
+    try:
+        info = ctrl.request_download(logical_path, client_request_id=str(uuid.uuid4()))
+        if not info.ok:
+            print(f"RequestDownload falhou: {info.message}")
+            return 1
+        dc = DataClient(info.egress.host, info.egress.port)
+        try:
+            dc.set_download_plan(info.download_id, info.total_size_bytes, info.chunks)
+            data = dc.download(info.download_id)
+        finally:
+            dc.close()
+        Path(dest).write_bytes(data)
+        print(f"baixado {len(data)} bytes em {dest}")
+        return 0
+    finally:
+        ctrl.close()
+
+
+def cmd_rm(logical_path: str) -> int:
+    ctrl = ControlClient()
+    try:
+        ack = ctrl.delete_file(logical_path)
+        print(ack.message)
+        return 0 if ack.ok else 1
+    finally:
+        ctrl.close()
+
+
+def cmd_ls() -> int:
+    ctrl = ControlClient()
+    try:
+        resp = ctrl.list_files()
+        for fe in resp.files:
+            print(f"{fe.logical_path}\t{fe.total_size_bytes} bytes\t"
+                  f"{fe.chunk_count} chunks\tnós={list(fe.nodes_used)}")
+        return 0
+    finally:
+        ctrl.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="dfs",
-        description="Cliente do DFS distribuído",
-    )
-    sub = parser.add_subparsers(dest="command", required=False)
-
-    put = sub.add_parser("put", help="Envia um arquivo para o DFS")
-    put.add_argument("source", help="arquivo local de origem")
-    put.add_argument("target", help="caminho lógico no DFS")
-
-    get = sub.add_parser("get", help="Lê um arquivo do DFS")
-    get.add_argument("path", help="caminho lógico no DFS")
-    get.add_argument("output", nargs="?", default=None, help="arquivo local de saída")
-
-    sub.add_parser("list", help="Lista entradas no DFS")
-
-    rm = sub.add_parser("rm", help="Remove um arquivo do DFS")
-    rm.add_argument("path", help="caminho lógico no DFS")
-
-    sub.add_parser("menu", help="Abre o menu interativo do DFS")
-
-    return parser
+    p = argparse.ArgumentParser(prog="dfs")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("put"); sp.add_argument("source"); sp.add_argument("logical_path")
+    sg = sub.add_parser("get"); sg.add_argument("logical_path"); sg.add_argument("dest")
+    sr = sub.add_parser("rm"); sr.add_argument("logical_path")
+    sub.add_parser("ls")
+    return p
 
 
-def print_menu() -> None:
-    commands = [
-        ("put <file> <dfs_path>", "Envia arquivo ao DFS."),
-        ("get <dfs_path> [local_file]", "Baixa arquivo do DFS."),
-        ("rm <dfs_path>", "Remove arquivo do DFS."),
-        ("list", "Lista entradas no DFS."),
-        ("exit | quit", "Encerra sessão."),
-    ]
-    examples = [
-        "put teste.txt docs/teste.txt",
-        "get docs/teste.txt copia.txt",
-        "rm docs/teste.txt",
-        "list",
-    ]
-
-    print("\n" + "=" * 110)
-    print("SISTEMA DE ARQUIVOS DISTRIBUÍDO (DFS) - MENU INTERATIVO")
-    print("=" * 110)
-
-    left_title, right_title = "COMANDOS DISPONÍVEIS", "EXEMPLOS"
-    print(f"{left_title:<58}{right_title:<50}")
-    print(f"{'-' * 56}  {'-' * 48}")
-
-    max_rows = max(len(commands), len(examples))
-    for i in range(max_rows):
-        left = f"{commands[i][0]:<28} {commands[i][1]:<27}" if i < len(commands) else ""
-        right = examples[i] if i < len(examples) else ""
-        print(f"{left:<58}{right}")
-
-    print("=" * 110)
-    print("Digite 'help', 'menu' ou '?' para reexibir o menu a qualquer momento.")
-    print("=" * 110 + "\n")
-
-
-def _run_single_command(client: DFSClient, args: argparse.Namespace) -> None:
-    if args.command == "put":
-        source = Path(args.source)
-        if not source.exists():
-            print(f"Arquivo local não encontrado: {source}")
-            return
-        data = source.read_bytes()
-        response = client.send("PUT", path=args.target, data=data)
-        print(response.message)
-        return
-
-    if args.command == "get":
-        response = client.send("GET", path=args.path)
-        if not response.ok:
-            print(response.message)
-            return
-        output = args.output or Path(args.path).name or "saida.bin"
-        Path(output).write_bytes(response.data)
-        print(f"{response.message} -> salvo em {output}")
-        return
-
-    if args.command == "list":
-        response = client.send("LIST")
-        if not response.ok:
-            print(response.message)
-            return
-        if not response.entries:
-            print("(vazio)")
-            return
-        for entry in response.entries:
-            print(entry)
-        return
-
-    if args.command == "rm":
-        response = client.send("DELETE", path=args.path)
-        print(response.message)
-        return
-
-    if args.command == "menu":
-        interactive_menu()
-        return
-
-    print("Comando inválido.")
-    print_menu()
-
-
-def interactive_menu() -> None:
-    parser = build_parser()
-    print_menu()
-    try:
-        with DFSClient() as client:
-            while True:
-                try:
-                    raw = input("dfs> ").strip()
-                except EOFError:
-                    print("\nEncerrando sessão.")
-                    break
-                if not raw:
-                    continue
-                
-                lowered = raw.lower()
-                if lowered in {"exit", "quit"}:
-                    print("Encerrando sessão.")
-                    break
-                if lowered in {"help", "menu", "?"}:
-                    print_menu()
-                    continue
-
-                try:
-                    argv = shlex.split(raw)
-                    if argv:
-                        argv[0] = argv[0].lower()
-                    args = parser.parse_args(argv)
-                except SystemExit:
-                    print("Entrada inválida. Digite 'help' para ver os comandos.\n")
-                    continue
-                except ValueError as exc:
-                    print(f"Erro ao interpretar comando: {exc}\n")
-                    continue
-
-                if args.command is None:
-                    print("Nenhum comando informado. Digite 'help'.\n")
-                    continue
-
-                _run_single_command(client, args)
-                print()
-
-    except Exception as exc:
-        print(f"Erro na sessão interativa: {exc}")
-
-
-def main(argv=None) -> None:
-    parser = build_parser()
-    argv = argv or []
-
-    if len(argv) == 0:
-        interactive_menu()
-        return
-
-    args = parser.parse_args(argv)
-
-    if args.command is None:
-        parser.print_help()
-        return
-
-    if args.command == "menu":
-        interactive_menu()
-        return
-
-    with DFSClient() as client:
-        _run_single_command(client, args)
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.cmd == "put":
+        return cmd_put(args.source, args.logical_path)
+    if args.cmd == "get":
+        return cmd_get(args.logical_path, args.dest)
+    if args.cmd == "rm":
+        return cmd_rm(args.logical_path)
+    if args.cmd == "ls":
+        return cmd_ls()
+    return 2
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
