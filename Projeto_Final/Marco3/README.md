@@ -7,45 +7,50 @@
 
 Este projeto acadêmico e de engenharia de software consiste na implementação de uma infraestrutura robusta de **Sistema de Arquivos Distribuído (DFS - Distributed File System)** desenvolvida integralmente na linguagem Python. Historicamente, o sistema evoluiu a partir de uma arquitetura legada (Marcos 1 e 2) baseada em sockets TCP brutos (puros), os quais dependiam de um mecanismo de controle de fluxo manual e arbitrário denominado *framing por tamanho* (implementado via `frame.py` e `protocol.py`). No **Marco 3**, o ecossistema sofre uma completa disrupção arquitetural, abandonando as amarras do gerenciamento manual de buffers de rede de baixo nível e migrando de forma definitiva para uma infraestrutura de rede moderna, nativa, assíncrona e multiplexada baseada em **gRPC** (Remote Procedure Calls) rodando sobre a camada de transporte **HTTP/2**, utilizando o **Protocol Buffers (Protobuf)** tanto como linguagem de definição de interface (IDL - Interface Definition Language) estrita quanto como motor de serialização binária ultraotimizada em tempo de execução (runtime).
 
-No contexto do **Marco 3**, a topologia lógica e física do cluster deixa de operar sob a ótica de um Sharding simples e estático, despido de qualquer tolerância a falhas, e transmuta-se em um ecossistema distribuído de alta complexidade, descentralizado, coordenado e altamente tolerante a partições de rede. O sistema passa a ser estruturado com base nos seguintes pilares fundamentais:
+No contexto do **Marco 3**, a topologia lógica e física do cluster deixa de operar sob a ótica de um Sharding simples e estático, despido de qualquer tolerância a falhas, e transmuta-se em um ecossistema distribuído de alta complexidade, descentralizado, coordenado e tolerante a falhas de nós. A decisão arquitetural mais importante deste marco — e que organiza todo o resto do sistema — é a **separação rigorosa entre o plano de controle (control plane) e o plano de dados (data plane)**, na qual o coordenador centraliza unicamente as decisões e os metadados, enquanto os bytes pesados dos arquivos trafegam diretamente entre o cliente e os nós, sem nunca passar pelo coordenador. O sistema passa a ser estruturado com base nos seguintes pilares fundamentais:
 
-- **Múltiplos Nós de Armazenamento Coordenados e Independentes (Workers):** Instâncias autônomas que gerenciam seus próprios discos rígidos virtuais, respondendo a chamadas de I/O de rede sem conhecimento centralizado do restante do cluster.
-- **Particionamento e Fragmentação de Arquivos em Chunks Líquidos:** Arquivos volumosos inseridos no ecossistema não são armazenados como blocos monolíticos. O sistema realiza o fatiamento lógico do arquivo em pedaços binários de tamanho fixo configurável (`CHUNK_SIZE`), otimizando o paralelismo e a distribuição espacial da carga de disco.
-- **Replicação Ativa de Dados com Fator Fixo ($N=3$):** Para cada bloco lógico (*chunk*) gerado pelo processo de fragmentação, o ecossistema calcula e propaga de forma síncrona/concorrente três réplicas idênticas em servidores físicos totalmente isolados, mitigando riscos de perda de dados decorrentes de falhas de hardware.
-- **Consistência Forte via Modelo de Quórum Estrito ($W=2, R=2$):** O DFS adota salvaguardas matemáticas estritas para garantir que leituras de dados obsoletos (*stale reads*) sejam impossibilitadas em tempo de execução, assegurando que o cliente sempre obtenha o estado mais legítimo e recente da informação.
-- **Controle de Versionamento Global e Atômico:** Cada mutação de estado de um arquivo dispara um incremento atômico em um contador global de versões gerenciado pelo plano de controle. Esse metadado de versão é carimbado fisicamente junto aos blocos de bytes nos discos dos Workers, servindo como token definitivo de auditoria.
-- **Separação Estrita entre Control Plane (Plano de Controle) e Data Plane (Plano de Dados):** Descentralização radical do tráfego de rede do cluster. O nó centralizador (Coordenador) é completamente removido do fluxo de passagem de bytes pesados, atuando única e exclusivamente na resolução lógica de rotas, metadados e quóruns.
+- **Múltiplos Nós de Armazenamento Coordenados e Independentes (Workers):** Instâncias autônomas (cinco no total, $N=5$) que gerenciam seus próprios discos rígidos virtuais, respondendo a chamadas de I/O de rede e cooperando entre si para replicar blocos, sem que o coordenador intermedeie o tráfego de dados.
+- **Particionamento e Fragmentação de Arquivos em Chunks Líquidos:** Arquivos volumosos inseridos no ecossistema não são armazenados como blocos monolíticos. O sistema realiza o fatiamento lógico do arquivo em pedaços binários de tamanho fixo configurável (`CHUNK_SIZE = 4 MB`), otimizando o paralelismo e a distribuição espacial da carga de disco. Esse corte é responsabilidade de um **nó-gateway (ingress)**, e não do cliente nem do coordenador.
+- **Replicação Ativa de Dados com Fator Fixo ($R=3$):** Para cada bloco lógico (*chunk*) gerado pelo processo de fragmentação, o ecossistema propaga de forma concorrente três réplicas idênticas em servidores físicos distintos, mitigando riscos de perda de dados decorrentes de falhas de hardware. A propagação é um *fan-out* paralelo disparado pelo nó-gateway, não pelo coordenador.
+- **Placement Determinístico por Round-Robin (não mais Hashing):** A localização das réplicas de cada chunk é decidida por uma regra pura e determinística de round-robin sobre o índice do chunk (módulo o número de nós), substituindo definitivamente o sharding por hash do Marco 2. A regra é calculada **uma única vez** no momento do upload e persistida nos metadados, jamais recalculada.
+- **Quórum de Escrita Estável ($W=2$):** O nó-gateway só considera um chunk gravado com sucesso quando ao menos duas das três réplicas confirmam o armazenamento, garantindo que a escrita sobreviva à falha de uma réplica durante o upload. A leitura, por sua vez, opera com **failover sequencial** entre réplicas (descrito na seção 4.2), garantindo disponibilidade enquanto ao menos uma réplica de cada chunk estiver viva.
+- **Supervisão de Nós por Heartbeat (ALIVE / SUSPECT / DEAD):** Cada nó registra-se ao subir e envia batimentos periódicos com inventário de chunks (*block report*); o coordenador classifica cada nó pelo tempo de silêncio e o usa para roteamento (escolha de ingress/egress).
+- **Handoff de Plano via Contrato Interno (`dataplane.proto`):** O cliente repassa ao nó-gateway o mapa de chunks recebido do coordenador **antes** de abrir o stream de bytes, por meio de um serviço interno do plano de dados, mantendo o contrato compartilhado (`dfs.proto`) intocado.
+- **Controle de Versionamento Global e Atômico `[Planejado — Marco 4]`:** O carimbo de versão por chunk e o quórum de leitura $R=2$ com anti-entropia são descritos como objetivo de design para consistência forte linearizável, ainda não implementados no Marco 3 (cuja leitura usa failover sequencial).
 - **Motor de Computação Distribuída Orientado a Localidade de Dados (MapReduce) `[Não Feito]`:** Acoplamento de uma engine de processamento paralelo que envia a computação em direção ao local físico onde os blocos de dados residem, minimizando drasticamente o tráfego e o overhead de rede no cluster.
-- **Metadados Persistentes com Rastreabilidade Multinível:** O estado lógico de todo o cluster é mantido de forma transacional e transparente por meio de um índice mestre baseado em JSON, mapeando com precisão as coordenadas físicas, lógicas e temporais de cada arquivo.
+- **Separação Estrita entre Control Plane (Plano de Controle) e Data Plane (Plano de Dados):** Descentralização radical do tráfego de rede do cluster. O nó centralizador (Coordenador) é completamente removido do fluxo de passagem de bytes pesados, atuando única e exclusivamente na resolução lógica de rotas, posicionamento (placement) e metadados.
+- **Metadados Persistentes com Rastreabilidade Multinível:** O estado lógico de todo o cluster é mantido de forma transacional e transparente por meio de um índice mestre baseado em JSON, mapeando com precisão as coordenadas físicas, lógicas e de tamanho de cada arquivo, chunk e réplica.
 
-A meta principal deste terceiro marco regulatório do projeto é validar o comportamento macro e micro do DFS sob estresse, concorrência agressiva de escrita/leitura e cenários degradados de falhas de rede ou colapso de servidores. O objetivo é certificar que o sistema consiga replicar dados de maneira íntegra, manter-se online e consistente mesmo com a queda abrupta de nós de armazenamento, processar buscas analíticas paralelas nos discos e fornecer métricas estáveis de execução.
+A meta principal deste terceiro marco regulatório do projeto é validar o comportamento macro e micro do DFS sob estresse, concorrência agressiva de escrita/leitura e cenários degradados de falhas de rede ou colapso de servidores. O objetivo é certificar que o sistema consiga replicar dados de maneira íntegra, manter-se online e consistente mesmo com a queda abrupta de nós de armazenamento, e fornecer um caminho de dados que escala com a adição de novos nós. **O Marco 3 foi integrado e validado de ponta a ponta:** as operações `put`, `get`, `list` e `rm` funcionam com verificação byte a byte do round-trip, com o coordenador real (`ControlService`) e os cinco nós reais cooperando via gRPC.
 
 ---
 
 ## 🧠 2. Arquitetura Geral e Decomposição de Planos
 
-O DFS foi arquitetado seguindo padrões modernos de sistemas distribuídos de larga escala (fortemente inspirado em conceitos do Google File System e Apache HDFS), organizando-se em camadas rigidamente isoladas de responsabilidade. Essa abordagem garante o desacoplamento absoluto entre as interfaces de usuário, a lógica centralizada de orquestração do cluster e os subsistemas de persistência física em disco.
+O DFS foi arquitetado seguindo padrões modernos de sistemas distribuídos de larga escala (fortemente inspirado em conceitos do Google File System e Apache HDFS), organizando-se em camadas rigidamente isoladas de responsabilidade. Essa abordagem garante o desacoplamento absoluto entre as interfaces de usuário, a lógica centralizada de orquestração do cluster e os subsistemas de persistência física em disco. A organização do código é feita por **papel técnico** (interface, aplicação, cluster, storage), não por componente, de forma que um servicer gRPC (adaptador de rede) delega para um serviço de lógica, que por sua vez usa a infraestrutura de cluster e a persistência local.
 
 ### 2.1 O Plano de Controle (Control Plane) vs. O Plano de Dados (Data Plane)
 
 O principal avanço arquitetural do Marco 3 reside na separação definitiva dos fluxos de sinalização e de tráfego pesado:
 
-- **O Control Plane (Coordenador):** Gerencia exclusivamente metadados. Ele opera como um servidor gRPC ultraleve encarregado de escutar solicitações de mapeamento estrutural. Quando a CLI solicita um `put`, o Coordenador calcula os hashes de sharding, valida os locks de concorrência, incrementa o número da versão e devolve uma "receita de bolo" contendo os IPs e portas dos nós que devem abrigar ou fornecer os dados. O Coordenador **nunca** abre buffers para ler ou transmitir os bytes dos arquivos dos usuários.
-- **O Data Plane (CLI e Workers):** Compreende a malha de tráfego de bytes brutos. De posse da tabela de roteamento fornecida pelo Control Plane, a CLI (atuando como um *Thick Client* inteligente) assume a responsabilidade de abrir streams gRPC bi-direcionais diretamente com os Nós de Armazenamento (*Storage Nodes*). Os dados trafegam ponto a ponto pela periferia da rede, escalando o throughput global de forma linear, pois a adição de novos nós expande a largura de banda de I/O de maneira diretamente proporcional, sem criar gargalos no nó central.
+- **O Control Plane (Coordenador):** Gerencia exclusivamente metadados. Ele opera como um servidor gRPC ultraleve encarregado de escutar solicitações de mapeamento estrutural. Quando a CLI solicita um `put`, o Coordenador calcula o **placement round-robin determinístico** de cada chunk, escolhe qual nó atuará como ingress, reserva um `upload_id` e devolve uma "receita de bolo" (o mapa de `ChunkPlacement`) contendo os IDs e endereços (host:port) dos nós que devem abrigar cada réplica. O Coordenador **nunca** abre buffers para ler ou transmitir os bytes dos arquivos dos usuários; ele apenas decide e persiste. A persistência dos metadados ocorre somente quando o ingress confirma o upload (`ConfirmUpload`).
+- **O Data Plane (CLI e Workers):** Compreende a malha de tráfego de bytes brutos. De posse da tabela de roteamento fornecida pelo Control Plane, a CLI (atuando como um *cliente fraco*, que não fatia nem decide nada) entrega o plano ao nó-gateway via `SetUploadPlan` e em seguida abre um stream gRPC diretamente com esse nó (ingress no PUT, egress no GET). Os dados trafegam ponto a ponto pela periferia da rede, escalando o throughput global de forma linear, pois a adição de novos nós expande a largura de banda de I/O de maneira diretamente proporcional, sem criar gargalos no nó central. A replicação entre réplicas e a busca de chunks em peers também ocorrem diretamente entre nós, jamais pelo coordenador.
 
 ### 2.2 Visão Detalhada dos Componentes
 
 Para mapear a topologia do sistema, os seguintes componentes de software cooperam dinamicamente:
 
-- **CLI Client (Interface de Linha de Comando):** Componente que intercepta as entradas do operador humano, executa o parsing de argumentos e gerencia o ciclo de vida de um cliente persistente. Ele mantém canais HTTP/2 aquecidos (*warmed-up gRPC stubs*) para evitar a latência repetitiva de handshake TCP.
-- **Coordenador Principal (Master Node):** Servidor centralizado detentor da inteligência de controle de concorrência, despacho de tarefas analíticas e centralização lógica do índice do sistema de arquivos distribuído.
-- **Sharding Manager (Gerenciador de Particionamento):** Módulo matemático matemático responsável por computar e resolver funções de espalhamento hash determinísticas, garantindo a seleção rigorosa das três réplicas geográficas ($N=3$) para cada bloco de arquivo.
-- **Node Registry (Registro de Nós):** Banco de dados estático e dinâmico mantido em memória pelo Coordenador que monitora as identidades, mapeamentos de sockets (IP:Porta), diretórios de trabalho físicos e status de conectividade de cada Worker do cluster.
-- **Node Client Interno:** Uma instância de cliente gRPC embutida no próprio Coordenador, utilizada estritamente para comunicação inter-nós (*East-West traffic*), permitindo que o mestre envie ordens administrativas de limpeza, deleção física de blocos ou gatilhos computacionais.
-- **File Service (Camada de Aplicação do Coordenador):** Orquestrador de alto nível que implementa as regras de negócio distribuídas, aplicando de forma estrita as barreiras matemáticas dos quóruns de escrita ($W=2$) e leitura ($R=2$).
-- **Metadata Service (Serviço de Metadados):** Componente transacional encarregado de efetuar operações de leitura e escrita atômicas no arquivo de persistência mestre `metadata_index.json`, provendo mecanismos de isolamento para evitar corrupção de concorrência.
-- **Node Service (Camada de Aplicação do Worker):** Serviço gRPC síncrono hospedado em cada Nó de Armazenamento que expõe as assinaturas de procedimentos remotos para gravação física de pedaços binários e leitura de fluxos de bytes.
-- **Local Storage Manager (Gerenciador de Armazenamento Local):** Módulo que encapsula as chamadas de I/O do sistema operacional hospedeiro. Ele manipula os arquivos físicos com extensão `.chunk`, organiza subpastas baseadas em estruturas hierárquicas virtuais e garante o isolamento de caminhos.
+- **CLI Client (Interface de Linha de Comando):** Componente que intercepta as entradas do operador humano, executa o parsing de argumentos e gerencia o ciclo de vida de um cliente persistente. Ele mantém um canal HTTP/2 aquecido (*warmed-up gRPC stub*) com o coordenador durante toda a sessão interativa, evitando a latência repetitiva de handshake TCP a cada comando. Faz **três chamadas** no PUT (RequestUpload → SetUploadPlan → UploadFile) e três simétricas no GET.
+- **Coordenador Principal (Master Node):** Servidor centralizado (`ControlService`) detentor da inteligência de controle: posicionamento de chunks, escolha de ingress/egress, supervisão de nós via heartbeat e centralização lógica do índice do sistema de arquivos distribuído. Escuta em `127.0.0.1:9100`.
+- **Placement Engine (Motor de Posicionamento Round-Robin):** Módulo matemático puro (`placement.py`) responsável por computar, de forma determinística e sem estado, as réplicas de cada chunk a partir do seu índice ordinal (round-robin módulo $N$). Substitui o antigo Sharding Manager por hash. A mesma função decide o ingress de cada arquivo (round-robin entre arquivos).
+- **Node Registry (Registro de Nós):** Catálogo mantido em memória pelo Coordenador que separa duas responsabilidades: a **membership canônica** (lista fixa e ordenada dos $N$ nós, lida do `config.py`, consumida pelo placement) e o **estado vivo** (quem está ALIVE / SUSPECT / DEAD agora, atualizado por registro e heartbeat, consumido pelo roteamento).
+- **Replication Client Interno:** Cliente gRPC usado em dois papéis: pelo **coordenador**, para comandar a deleção física de chunks nos nós (`DeleteChunk`); e pelos **nós**, para o fan-out de réplicas (ingress → réplicas, `StoreChunk`) e a busca de chunks em peers (egress → peer, `FetchChunk`). Vive em `replication_client.py`.
+- **Control Service (Camada de Aplicação do Coordenador):** Implementa concretamente o `ControlServiceServicer` (em `server.py`), aplicando as regras de negócio do plano de controle: autorização de upload/download, confirmação de upload, deleção comandada e listagem. Não toca em bytes.
+- **Metadata Service (Serviço de Metadados):** Componente transacional (`metadata_service.py`) encarregado de efetuar operações de leitura e escrita protegidas por lock no arquivo de persistência mestre `metadata_index.json`, provendo isolamento contra corrupção por concorrência. Armazena, por arquivo, o tamanho total, a lista de chunks e, por chunk, as réplicas.
+- **Data Service (Camada de Aplicação do Worker — Gateway):** Serviço gRPC (`data_service.py`) hospedado em cada Nó. Implementa o `UploadFile` (o nó como **ingress**: recebe o stream, reagrupa em chunks de `CHUNK_SIZE`, grava local se for réplica e dispara o fan-out paralelo) e o `DownloadFile` (o nó como **egress**: junta chunks locais e busca os faltantes em peers, emitindo o stream em ordem).
+- **Replication Service (Camada de Aplicação do Worker — Nó-a-nó):** Serviço gRPC (`replication_service.py`) que atende outros nós e o coordenador: `StoreChunk` (recebe um chunk de uma réplica), `FetchChunk` (serve um chunk a um peer), `DeleteChunk` (apaga um chunk a mando do coordenador) e `ListChunks` (diagnóstico).
+- **Data Plane Service (Handoff do Plano):** Serviço gRPC interno (`plan_store.py`, contrato em `dataplane.proto`) exposto pelos nós na mesma porta do DataService. Recebe da CLI o plano de chunks (`SetUploadPlan` / `SetDownloadPlan`) antes do stream e o guarda em memória (`PlanStore`), para o DataService consumir durante a operação.
+- **Local Storage Manager (Gerenciador de Armazenamento Local):** Módulo (`local_storage.py`) que encapsula as chamadas de I/O do sistema operacional hospedeiro. Mantém a API legada por caminho lógico e adiciona a API por `chunk_id`, gravando cada chunk em `chunks/<chunk_id>` (sem extensão, para casar com o regex do observer), além de garantir isolamento de caminhos.
 - **MapReduce Service `[Não Feito]`:** Componente mestre do plano de controle encarregado de fracionar expressões de busca analítica, mapear a proximidade física dos blocos correspondentes e consolidar (*Reduce*) os vetores numéricos leves devolvidos pela periferia do cluster.
 - **Node Compute Service `[Não Feito]`:** Motor de processamento local acoplado ao Worker. Ele varre os arquivos locais persistidos em disco, aplicando filtros algorítmicos em memória (*Map*) sem realizar qualquer tráfego de rede pesado de arquivos.
 
@@ -53,11 +58,11 @@ Para mapear a topologia do sistema, os seguintes componentes de software coopera
 
 ## 🔍 3. Diagramas de Fluxo e Arquitetura
 
-Para documentar visualmente o comportamento operacional e o tráfego de rede síncrono estabelecido entre os componentes do DFS no Marco 3, esta seção expõe os diagramas de blocos de comunicação e as sequências de eventos cronológicos.
+Para documentar visualmente o comportamento operacional e o tráfego de rede estabelecido entre os componentes do DFS no Marco 3, esta seção expõe os diagramas de blocos de comunicação e as sequências de eventos cronológicos.
 
 ### 3.1 Topologia de Rede e Fluxo Geral de Comunicação
 
-O diagrama abaixo ilustra a separação absoluta dos planos de comunicação. As linhas pontilhadas simbolizam tráfego puro de controle e sinalização de metadados, enquanto as linhas duplas contínuas simbolizam o transporte maciço de payloads binários (bytes de dados):
+O diagrama abaixo ilustra a separação absoluta dos planos de comunicação. As linhas pontilhadas simbolizam tráfego puro de controle e sinalização de metadados (CLI ↔ coordenador; nós → coordenador no registro/heartbeat), enquanto as linhas duplas contínuas simbolizam o transporte maciço de payloads binários (bytes de dados, CLI ↔ nó-gateway e nó ↔ nó):
 
 ```text
        ===================================================================
@@ -67,85 +72,96 @@ O diagrama abaixo ilustra a separação absoluta dos planos de comunicação. As
                             +-------------------+
                             |    COORDENADOR    |
                             |  (Control Plane)  |
+                            |  127.0.0.1:9100   |
                             +-------------------+
                               .       ^       .
-                              .       |       .
-      [RegisterWrite/Read]    .       |       . [Purge/Compute Ordens]
-      (Sinalização/Metadados) .       |       . (gRPC Interno)
-                              .       |       .
-                              v       |       v
+        [RequestUpload/Download].     |       . [RegisterNode / Heartbeat]
+        [ConfirmUpload/Delete]  .     |       . (nós -> coordenador, controle)
+        (Sinalização/Metadados) .     |       .
+                              v       |       .
                       +-------------------------------+
                       |          CLI CLIENT           |
-                      |         (Data Plane)          |
+                      |  (cliente fraco / Data Plane) |
                       +-------------------------------+
-                        /             |             \
-                       /              |              \
-     [gRPC Direct Stream]      [gRPC Direct Stream]    [gRPC Direct Stream]
-     (Bytes Brutos / Payloads) (Bytes Brutos / Payload)(Bytes Brutos / Payload)
-                     /                |                \
-                    v                 v                 v
-           +--------------+   +--------------+   +--------------+
-           | STAGE NODE 1 |   | STAGE NODE 2 |   | STAGE NODE 3 |
-           |   (Worker)   |   |   (Worker)   |   |   (Worker)   |
-           +--------------+   +--------------+   +--------------+
-           | Local Disk 1 |   | Local Disk 2 |   | Local Disk 3 |
-           +--------------+   +--------------+   +--------------+
+                          ||  (1) SetUploadPlan / SetDownloadPlan  (handoff)
+                          ||  (2) UploadFile / DownloadFile (stream de bytes)
+                          vv
+                  +-----------------------------------------------+
+                  |              NO-GATEWAY (ingress/egress)       |
+                  +-----------------------------------------------+
+                     ||  fan-out StoreChunk (PUT) / FetchChunk (GET)
+                     ||  (trafego nó-a-nó, direto, sem coordenador)
+          +-----------++-----------+-----------+-----------+
+          v           v           v           v           v
+   +-----------+ +-----------+ +-----------+ +-----------+ +-----------+
+   | STORAGE 1 | | STORAGE 2 | | STORAGE 3 | | STORAGE 4 | | STORAGE 5 |
+   |  :9101    | |  :9102    | |  :9103    | |  :9104    | |  :9105    |
+   +-----------+ +-----------+ +-----------+ +-----------+ +-----------+
+   | Disk 1    | | Disk 2    | | Disk 3    | | Disk 4    | | Disk 5    |
+   +-----------+ +-----------+ +-----------+ +-----------+ +-----------+
 ```
 
 ---
 
 ### 3.2 Diagrama de Sequência Comportamental: Operação PUT
 
-Este diagrama detalha a ordem cronológica de chamadas de rede executadas quando o cliente injeta um novo arquivo no sistema de arquivos distribuído, destacando a validação ativa do quórum de escrita estável:
+Este diagrama detalha a ordem cronológica de chamadas de rede executadas quando o cliente injeta um novo arquivo no sistema de arquivos distribuído, destacando o handoff do plano e a validação ativa do quórum de escrita estável. Note que os bytes vão para UM nó (o ingress), que então replica para as demais réplicas de cada chunk:
 
 ```text
-CLI Client (CLI)         Coordenador (Master)       Storage Node 1      Storage Node 2      Storage Node 3
-    |                             |                       |                   |                   |
-    |--- 1. RegisterWrite() ----->|                       |                   |                   |
-    |    (Path, Size, Chunks)     |                       |                   |                   |
-    |                             |-- 2. Incrementa Ver.  |                   |                   |
-    |                             |   Gera Shard Map (N=3)|                   |                   |
-    |<-- 3. Retorna Shard Map ----|                       |                   |                   |
-    |    (Identidade dos Nós)     |                       |                   |                   |
-    |                             |                       |                   |                   |
-    |--- 4. WriteChunk(chunk_0, v1) --------------------->|                   |                   |
-    |--- 5. WriteChunk(chunk_0, v1) ----------------------------------------->|                   |
-    |--- 6. WriteChunk(chunk_0, v1) (Paralelo) -------------------------------------------------->| (Falha/Timeout)
-    |                             |                       |                   |                   |
-    |<-- 7. ConfirmarEscrita(OK) -------------------------|                   |                   |
-    |<-- 8. ConfirmarEscrita(OK) ---------------------------------------------|                   |
-    |                             |                       |                   |                   |
-    |=== 9. AVALIAÇÃO DE QUÓRUM DE ESCRITA: Recebeu 2 Confirmações Estáveis (W=2)? SIM! ===========|
-    |=== 10. Operação homologada com Sucesso Absoluto no Cluster. =================================|
-    |                             |                       |                   |                   |
+CLI Client            Coordenador          Ingress (nó)        Réplica A (nó)     Réplica B (nó)
+    |                      |                    |                   |                  |
+    |-- 1. RequestUpload ->|                    |                   |                  |
+    |   (path, size)       |                    |                   |                  |
+    |                      |- 2. Placement R-R  |                   |                  |
+    |                      |   escolhe ingress  |                   |                  |
+    |<- 3. (upload_id, ----|                    |                   |                  |
+    |   ingress, chunks)   |                    |                   |                  |
+    |                      |                    |                   |                  |
+    |-- 4. SetUploadPlan ----------------------> | (guarda plano no PlanStore)         |
+    |<- Ack ------------------------------------ |                   |                  |
+    |                      |                    |                   |                  |
+    |== 5. UploadFile (stream de bytes, 64KB) => | (reagrupa em chunks de 4MB)         |
+    |                      |                    |-- 6. StoreChunk -> |                  |
+    |                      |                    |-- 6. StoreChunk ----------------------> |
+    |                      |                    |   (fan-out paralelo, grava local)    |
+    |                      |                    |<- ok ------------- |                  |
+    |                      |                    |<- ok -------------------------------- |
+    |                      |                    |== 7. QUORUM W=2: 2+ replicas OK? SIM ==|
+    |                      |<- 8. ConfirmUpload -|                   |                  |
+    |                      |   (grava metadados) |                   |                  |
+    |<= 9. UploadResult (ok) ===================== |                  |                  |
 ```
 
 ---
 
 ### 3.3 Diagrama de Sequência Comportamental: Operação GET
 
-O diagrama abaixo expõe o fluxo de recuperação descentralizada de dados, demonstrando graficamente a operação do mecanismo de anti-entropia quando a CLI se depara com uma réplica desatualizada persistida em um nó que sofreu falhas passadas:
+O diagrama abaixo expõe o fluxo de recuperação descentralizada de dados, demonstrando o nó-egress montando o arquivo a partir dos chunks que tem localmente e buscando em peers (via `FetchChunk`) os que faltam, com **failover sequencial** entre as réplicas de cada chunk:
 
 ```text
-CLI Client (CLI)         Coordenador (Master)       Storage Node 1      Storage Node 2      Storage Node 3
-    |                             |                       |                   |                   |
-    |--- 1. GetMetadata(Logical) ->|                       |                   |                   |
-    |<-- 2. Retorna Meta Mestre --|                       |                   |                   |
-    |    (Espera Versão v2)       |                       |                   |                   |
-    |                             |                       |                   |                   |
-    |--- 3. ReadChunk(chunk_0) -------------------------->|                   |                   |
-    |--- 4. ReadChunk(chunk_0) ---------------------------------------------->|                   |
-    |                             |                       |                   |                   |
-    |<-- 5. Retorna Bytes + [v2] -------------------------|                   |                   |
-    |<-- 6. Retorna Bytes + [v1] (STALE DATA!) -------------------------------|                   |
-    |                             |                       |                   |                   |
-    |=== 7. ANTI-ENTROPIA: Compara v2 (Mestre) com v1 (Stale). Descarta dados do Node 2! ==========|
-    |                             |                       |                   |                   |
-    |--- 8. ReadChunk(chunk_0) Fallback --------------------------------------------------------->|
-    |<-- 9. Retorna Bytes + [v2] -----------------------------------------------------------------|
-    |                             |                       |                   |                   |
-    |=== 10. QUÓRUM DE LEITURA ATINGIDO: 2 Réplicas idênticas na versão v2 obtidas (R=2). =========|
-    |=== 11. Concatena os bytes e remonta o arquivo íntegro no disco do usuário. ==================|
+CLI Client            Coordenador          Egress (nó)         Peer (nó)
+    |                      |                    |                   |
+    |-- 1. RequestDownload>|                    |                   |
+    |   (logical_path)     |                    |                   |
+    |                      |- 2. Le metadados   |                   |
+    |                      |   escolhe egress   |                   |
+    |                      |   (por localidade) |                   |
+    |<- 3. (download_id, --|                    |                   |
+    |   egress, total,     |                    |                   |
+    |   chunks)            |                    |                   |
+    |                      |                    |                   |
+    |-- 4. SetDownloadPlan --------------------> | (guarda plano no PlanStore)
+    |<- Ack ------------------------------------ |                   |
+    |                      |                    |                   |
+    |== 5. DownloadFile (download_id) =========> |                   |
+    |                      |        (para cada chunk em ordem:)     |
+    |                      |          - tem local? le do disco      |
+    |                      |          - nao tem? FetchChunk ------->  |
+    |                      |                    |<- bytes ---------- |
+    |                      |          (se peer falha, tenta o proximo da lista)
+    |<= 6. DownloadChunk (stream em ordem) ===== |                   |
+    |   (concatena e grava em disco)            |                   |
+    |== 7. round-trip byte a byte identico ao arquivo original =====|
 ```
 
 ---
@@ -154,52 +170,54 @@ CLI Client (CLI)         Coordenador (Master)       Storage Node 1      Storage 
 
 Esta seção disseca a mecânica íntima e o comportamento algorítmico de cada um dos fluxos operacionais expostos pelo ecossistema do DFS no Marco 3.
 
-### 4.1 Operação PUT (Injeção Distribuída com Quórum e Replicação Ativa)
+### 4.1 Operação PUT (Injeção Distribuída com Gateway, Handoff, Quórum e Replicação Ativa)
 
-O comando `put` é o fluxo mais complexo do sistema, envolvendo fragmentação, alocação determinística e coordenação síncrona de concorrência. Ele opera segundo o seguinte algoritmo em tempo de execução:
+O comando `put` é o fluxo mais complexo do sistema, envolvendo autorização, handoff do plano, fragmentação no gateway, replicação paralela e validação de quórum. Ele opera segundo o seguinte algoritmo em tempo de execução:
 
-1. **Interceptação e Inicialização:** O usuário invoca `python run_cli.py put <caminho_local> <caminho_logico>`. A subcamada de interface CLI intercepta o comando, valida a existência do arquivo local em disco e calcula o seu tamanho total em bytes.
-2. **Cálculo de Chunks Lógicos:** O arquivo local é fatiado virtualmente. Sabendo o tamanho do arquivo e o limite de `CHUNK_SIZE` definido nas configurações centrais do sistema, a CLI calcula a quantidade exata de chunks necessários. Por exemplo, um arquivo de 10MB submetido a um `CHUNK_SIZE` de 4MB gerará 3 chunks (`chunk_0` com 4MB, `chunk_1` com 4MB e `chunk_2` com 2MB).
-3. **Registro Lógico e Resolução de Roteamento:** A CLI dispara uma chamada RPC do tipo `RegisterWrite` para o Coordenador. O Coordenador intercepta a chamada e abre uma transação atômica em seu índice de metadados. Se o arquivo já existir, o Coordenador incrementa de forma incremental o número sequencial da versão global do arquivo (`v1` para `v2`, etc.). Se for um arquivo inédito, inicia na versão `v1`.
-4. **Resolução de Sharding Geográfico:** Para cada um dos chunks calculados, o Coordenador invoca o motor de sharding determinístico. Este motor aplica uma função hash sobre a composição da string do caminho lógico do arquivo fundida ao ID sequencial do bloco (`hash(logical_path + chunk_id)`). O resultado matemático aponta de forma precisa quais serão as três instâncias de Nós de Armazenamento ($N=3$) que atuarão como guardiãs daquelas réplicas específicas. O Coordenador grava essa topologia preliminar no arquivo JSON de índice e devolve o mapa de distribuição consolidado para a CLI.
-5. **Streaming Direto de Payloads Binários:** A CLI recebe a tabela de roteamento contendo os IPs e portas dos nós associados a cada chunk. A CLI abre conexões gRPC diretas com cada um dos nós mapeados. Utilizando chamadas de streaming binário, a CLI transmite concorrentemente e em paralelo os blocos de bytes diretamente para os discos dos Workers, informando juntamente a tag da versão global gerada.
-6. **Consolidação Física nos Workers:** Ao interceptar a chamada gRPC `WriteChunk`, o Worker aciona o seu gerenciador de armazenamento local. O bloco de bytes bruto é gravado no disco rígido local do nó, recebendo uma nomenclatura padronizada e imutável que anexa o identificador do chunk e a tag da versão legitimada (`/data/nodes/nodeX/pasta_logica/arquivo.txt.chunk_0.ver_1`).
-7. **Avaliação Matemática do Quórum de Escrita ($W=2$):** A CLI atua como árbitra do quórum de gravação. A operação de escrita de um chunk específico só é declarada consolidada se, e somente se, a CLI receber mensagens de confirmação de sucesso vindas de, no mínimo, **2 nós de armazenamento distintos ($W=2$)**. Caso um dos três nós designados esteja offline ou sofra um timeout de rede, a CLI ignora temporariamente a falha daquele nó individual, pois o quórum mínimo de 2 respostas foi atingido, garantindo a estabilidade e finalizando o fluxo com sucesso. Se 2 ou mais nós falharem simultaneamente, a CLI aborta o processo e reporta falha crítica catastrófica de quórum.
+1. **Interceptação e Inicialização:** O usuário invoca `python run_cli.py put <caminho_local> <caminho_logico>`. A subcamada de interface CLI intercepta o comando, valida a existência do arquivo local em disco e lê o seu conteúdo, calculando o tamanho total em bytes.
+2. **Autorização e Resolução de Roteamento (RequestUpload):** A CLI dispara uma chamada RPC `RequestUpload` para o Coordenador, informando o caminho lógico e o tamanho total. O Coordenador calcula quantos chunks o arquivo terá (`ceil(tamanho / CHUNK_SIZE)`), escolhe o **ingress** entre os nós vivos por round-robin entre arquivos, gera um `upload_id` único (UUID) e pré-computa o `ChunkPlacement` de cada chunk com a **membership canônica** (round-robin determinístico). Registra o upload como pendente e devolve à CLI o `upload_id`, o endereço do ingress e o mapa completo de chunks.
+3. **Handoff do Plano (SetUploadPlan):** A CLI repassa ao ingress, via `SetUploadPlan`, o `upload_id`, o tamanho total e o mapa de `ChunkPlacement`. O ingress guarda esse plano em memória (`PlanStore`), indexado pelo `upload_id`. Sem esse passo, o ingress aborta o stream com `FAILED_PRECONDITION` — o gateway precisa saber em quais réplicas gravar cada chunk antes de receber os bytes.
+4. **Streaming Direto ao Ingress (UploadFile):** A CLI abre o stream `UploadFile` direto com o ingress, enviando os bytes em pedaços de `STREAM_SIZE` (64 KB) — pequenos de propósito, para manter baixo o uso de memória e ficar muito abaixo do limite default de mensagem do gRPC. **Não há `GRPC_OPTIONS`:** como o transporte é fatiado em 64 KB, nenhuma mensagem chega perto do limite de 4 MB do gRPC, então a sintonia fina de tamanho de mensagem é desnecessária.
+5. **Reagrupamento e Fan-out no Ingress:** Conforme os bytes chegam, o ingress os reacumula em chunks oficiais de `CHUNK_SIZE`. Para cada chunk fechado, ele grava localmente caso seja uma das réplicas daquele chunk e dispara, **em paralelo (uma thread por réplica de destino, um canal por destino)**, a RPC `StoreChunk` para as demais réplicas determinadas pelo plano.
+6. **Consolidação Física nos Workers:** Ao interceptar o `StoreChunk`, o Worker de destino aciona o seu gerenciador de armazenamento local e grava o bloco de bytes em `data/nodes/nodeX/chunks/<chunk_id>`. A nomenclatura do chunk segue o padrão `<upload_id>_chunk_<índice>`, estável e livre de colisão (UUID por upload).
+7. **Avaliação Matemática do Quórum de Escrita ($W=2$):** O ingress arbitra o quórum: um chunk só é considerado gravado se ao menos **duas réplicas** (contando ele próprio, se for réplica) confirmarem. Atingido o quórum, o ingress chama `ConfirmUpload` no coordenador, reportando os chunks efetivamente gravados; o coordenador então persiste os metadados (é só aqui que o arquivo passa a existir para o sistema). O stream se encerra com `UploadResult(ok=true)`. *Observação de estado atual:* a tolerância plena à queda de réplica durante o fan-out é o ponto de robustez sob refinamento contínuo; o caminho feliz e o quórum estão implementados e validados.
 
-### 4.2 Operação GET (Recuperação Descentralizada e Resolução de Anti-Entropia)
+### 4.2 Operação GET (Recuperação Descentralizada com Egress por Localidade e Failover Sequencial)
 
-O fluxo de recuperação de dados implementa as garantias de consistência forte e prevenção contra leituras obsoletas. O fluxo se desdobra nas seguintes etapas:
+O fluxo de recuperação de dados implementa a disponibilidade de leitura por failover entre réplicas. O fluxo se desdobra nas seguintes etapas:
 
-1. **Requisição de Metadados Mestre:** O usuário executa `python run_cli.py get <caminho_logico> <destino_local>`. A CLI conecta-se via gRPC ao Coordenador invocando o método `GetMetadata`. O Coordenador efetua uma busca síncrona no índice `metadata_index.json`, captura a entrada lógica do arquivo e extrai dois metadados vitais: o mapa físico de alocação de chunks e o número exato da última versão estável consolidada globalmente no sistema de arquivos. Essas informações são envelopadas em uma mensagem Protobuf e enviadas de volta à CLI.
-2. **Varredura e Disparo de Canais de I/O de Leitura:** De posse do mapa mestre, a CLI inicia uma iteração sequencial para remontar o arquivo bloco por bloco. Para o `chunk_0`, a CLI identifica os três nós que teoricamente guardam suas réplicas. De forma concorrente, a CLI dispara chamadas remotas do tipo `ReadChunk` para **pelo menos 2 nós de armazenamento pertencentes àquela lista ($R=2$)**.
-3. **Mecanismo Ativo de Anti-Entropia (*Stale Read Prevention*):** Ao receber os fluxos de bytes acompanhados das tags de versão carimbadas pelos nós consultados, a CLI executa uma validação lógica estrita. Se o Coordenador informou que a versão mestre atual do arquivo é a `v3`, e o `Node_1` retornar o bloco carimbado com `v3`, mas o `Node_2` (por ter ficado temporariamente offline durante um PUT anterior) retornar o bloco carimbado com `v2`, a CLI detecta a assincronia e a obsolescência imediatamente. O bloco de bytes defasado do `Node_2` é sumariamente descartado. A CLI ativa um mecanismo de fallback em tempo de execução e conecta-se ao terceiro nó da lista (`Node_3`). Se o `Node_3` retornar a versão legítima `v3`, o quórum de leitura de 2 respostas consistentes ($R=2$) é satisfeito.
-4. **Remontagem e Escrita Linear em Disco:** Após extrair e convalidar com segurança os bytes puros pertencentes à versão legítima mais recente de todos os chunks do arquivo, a CLI concatena sequencialmente os fluxos recebidos e grava o fluxo binário unificado no disco local do usuário, replicando perfeitamente o arquivo original sem nenhuma corrupção ou perda de integridade.
+1. **Requisição de Autorização (RequestDownload):** O usuário executa `python run_cli.py get <caminho_logico> <destino_local>`. A CLI conecta-se via gRPC ao Coordenador invocando `RequestDownload`. O Coordenador efetua uma busca síncrona no índice `metadata_index.json`, captura a entrada lógica do arquivo, o tamanho total e o mapa físico de chunks. **Ele não recalcula placement** — apenas lê o que foi persistido no upload (essa é a regra que viabiliza a elasticidade). Em seguida escolhe o **egress por localidade**: o nó vivo que guarda o maior número de chunks do arquivo, minimizando buscas em peers. Devolve `download_id`, endereço do egress, tamanho total e o mapa de chunks.
+2. **Handoff do Plano (SetDownloadPlan):** A CLI repassa ao egress o `download_id`, o tamanho total e o mapa de chunks, que o egress guarda no `PlanStore`. Sem isso, o egress aborta com `FAILED_PRECONDITION`.
+3. **Streaming do Egress (DownloadFile) e Failover Sequencial:** A CLI abre o stream `DownloadFile`. Para cada chunk, em ordem de índice, o egress verifica se o tem localmente: se sim, lê do disco; se não, busca em um peer via `FetchChunk`. A busca em peer percorre as réplicas daquele chunk **sequencialmente**: se um peer não tem o chunk ou não responde, tenta o próximo da lista. Isso garante a disponibilidade da leitura enquanto **pelo menos uma** réplica de cada chunk estiver viva. Os bytes são emitidos em pedaços de `STREAM_SIZE`, em ordem estrita.
+4. **Remontagem e Escrita Linear em Disco:** A CLI concatena sequencialmente os fluxos recebidos e grava o fluxo binário unificado no disco local do usuário, replicando perfeitamente o arquivo original sem nenhuma corrupção ou perda de integridade (round-trip byte a byte verificado nos testes).
 
-### 4.3 Operação RM (Remoção Distribuída e Rotina de Expurgamento Físico)
+> **Nota de consistência (estado atual vs. objetivo):** o Marco 3 implementa **failover sequencial** na leitura, não um quórum de leitura $R=2$ com comparação de versão. O versionamento por carimbo e o quórum $R=2$ com anti-entropia (que tornariam a consistência forte linearizável, satisfazendo a inequação $W+R>N$) são descritos como evolução planejada (ver seções 5.2, 5.4 e 14).
 
-A deleção de arquivos no DFS opera de forma a garantir que nenhum dado órfão ou bloco fantasma permaneça consumindo os discos rígidos do cluster. O fluxo comporta-se da seguinte forma:
+### 4.3 Operação RM (Remoção Distribuída Comandada e Rotina de Expurgamento Físico)
 
-1. **Invalidação Lógica Instantânea:** O usuário aciona `python run_cli.py rm <caminho_logico>`. A CLI emite uma chamada `DeleteRequest` direcionada ao gRPC do Coordenador. O Coordenador remove imediatamente a chave correspondente ao arquivo de dentro do índice mestre em memória e atualiza o arquivo JSON em disco. A partir deste exato milésimo de segundo, o arquivo deixa de existir para qualquer operação de listagem ou leitura, garantindo atomicidade lógica.
-2. **Disparo de Sinais de Purga Assíncronos:** O Coordenador ativa seu componente `Node Client Interno`. Ele itera sobre a tabela de registros de nós ativos e, em paralelo, despacha chamadas remotas de controle denominadas `PurgeFile` para todos os nós de armazenamento cadastrados no ecossistema.
-3. **Varredura e Limpeza Física nos Nós:** Cada Worker intercepta a ordem de purga contendo a assinatura do caminho virtual deletado. O gerenciador de armazenamento local do nó localiza todos os arquivos físicos em seu disco que contenham correspondência estrutural com o arquivo excluído, apagando todos os chunks e todas as versões históricas remanescentes associadas àquele caminho.
-4. **Rotina de Limpeza de Subpastas Vazias:** Após deletar os arquivos `.chunk`, o módulo `Local Storage` do Worker executa uma varredura recursiva de baixo para cima nas pastas físicas locais. Se a exclusão do arquivo deixou diretórios ou subpastas virtuais completamente vazias dentro do nó, essas pastas são destruídas pelo sistema operacional para otimizar a árvore de diretórios do storage host.
+A deleção de arquivos no DFS opera de forma a garantir que nenhum dado órfão permaneça consumindo os discos do cluster, e é conduzida **pelo coordenador** (não pela CLI), pois é ele a autoridade sobre "este arquivo existe" e o detentor do mapa de chunks. O fluxo comporta-se da seguinte forma:
+
+1. **Invocação e Leitura dos Metadados:** O usuário aciona `python run_cli.py rm <caminho_logico>`. A CLI emite `DeleteFile` ao Coordenador. O Coordenador lê dos metadados o mapa de chunks do arquivo (a fonte sobre onde cada chunk está).
+2. **Inversão do Mapa e Disparo Paralelo de Purga:** O Coordenador inverte o mapa de "chunk → réplicas" para "nó → seus chunks" e dispara a deleção em paralelo: **uma thread por nó, um canal por nó**, chamando `DeleteChunk` (em lote) em cada Worker que guarda chunks do arquivo. É o mesmo padrão de fan-out usado na replicação do PUT.
+3. **Varredura e Limpeza Física nos Nós:** Cada Worker intercepta a ordem e apaga de seu disco local os chunks indicados. A deleção é *best-effort*: se um nó está morto, seus chunks contam como falha e ficam como órfãos a serem limpos quando o nó voltar (mecanismo `chunks_to_delete` do heartbeat, com campo já no contrato e lógica planejada para o Marco 4).
+4. **Remoção dos Metadados (ordem: chunks primeiro, metadados depois):** O Coordenador remove a entrada do índice **depois** de comandar a deleção física — mesmo que algumas deleções tenham falhado, o arquivo deixa de existir logicamente. A ordem (chunks antes, metadados depois) é deliberada: se os metadados fossem apagados primeiro e o processo morresse no meio, os chunks ficariam órfãos sem registro (lixo invisível); no sentido inverso, o pior caso é um metadado apontando para chunk já apagado, o que o GET detecta — prefere-se o erro detectável ao silencioso. A subcamada `Local Storage` ainda remove recursivamente subpastas vazias remanescentes.
 
 ### 4.4 Operação LIST (Auditoria e Inspeção do Índice de Metadados)
 
 O comando `list` provê uma janela de auditoria e transparência absoluta sobre o estado lógico atual da infraestrutura distribuída:
 
-1. **Invocação:** O usuário digita `python run_cli.py list`. A CLI aciona o stub gRPC correspondente no Coordenador.
-2. **Leitura e Consolidação:** O Coordenador intercepta a chamada e faz um dump síncrono do `metadata_index.json`. O sistema processa os metadados de forma a consolidar as informações para consumo humano.
-3. **Formatação de Saída:** O Coordenador devolve uma coleção estruturada de mensagens Protobuf contendo o caminho lógico completo de cada arquivo, seu tamanho total consolidado em bytes, a quantidade exata de chunks em que foi fragmentado pelo sistema e, criticamente, o número da versão global atual daquela entrada. A CLI recebe os dados e renderiza uma tabela formatada no terminal do operador.
+1. **Invocação:** O usuário digita `python run_cli.py list`. A CLI aciona o stub `ListFiles` no Coordenador.
+2. **Leitura e Consolidação:** O Coordenador lê o `metadata_index.json` e, para cada arquivo, monta uma mensagem `FileEntry` com o caminho lógico, o tamanho total em bytes, a quantidade de chunks e o conjunto de nós que possuem pelo menos um chunk daquele arquivo.
+3. **Formatação de Saída:** O Coordenador devolve uma coleção estruturada de mensagens Protobuf (`ListFilesResponse`). A CLI recebe os dados e renderiza, para cada arquivo, uma linha legível no terminal do operador, no formato `[FILE] <caminho>  (<n> chunk(s), <bytes> bytes, nodes=<...>)`.
 
 ### 4.5 Operação WORDCOUNT (MapReduce Paralelo Orientado a Localidade) `[Não Feito]`
 
 Projetado para computação distribuída analítica sobre o ecossistema do DFS, o fluxo opera minimizando drasticamente a movimentação de dados na rede:
 
 1. **Disparo Analítico:** O usuário executa `python run_cli.py wordcount <caminho_logico> <termo_busca>`.
-2. **Mapeamento de Afinidade por Localidade (*Data Locality*):** O Coordenador recebe a requisição. Em vez de ler o arquivo, ele consulta o mapa de chunks do arquivo. Ele identifica, por exemplo, que o `chunk_0` está no `Node_1`, o `chunk_1` está no `Node_2`, e assim por diante.
+2. **Mapeamento de Afinidade por Localidade (*Data Locality*):** O Coordenador recebe a requisição. Em vez de ler o arquivo, ele consulta o mapa de chunks do arquivo. Ele identifica, por exemplo, que o `chunk_0` está no `node1`, o `chunk_1` está no `node2`, e assim por diante.
 3. **Despacho Concorrente de Tarefas MapRPC:** O Coordenador aciona o `MapReduce Service` no Control Plane. Ele envia uma chamada gRPC leve (`RunMapTask`) diretamente para o `Node Compute Service` dos nós detentores físicos dos dados, passando o termo de busca.
-4. **Processamento Local em Disco (Fase Map):** Cada Worker recebe a ordem de computação. Ele abre os chunks locais persistidos em seu próprio disco rígido, lê os bytes diretamente para a memória local do servidor e executa uma contagem de strings concorrente de alta velocidade. O nó calcula o número de ocorrências localmente e devolve para o Coordenador apenas um número inteiro leve (ex: "Node 1 encontrou 45 ocorrências"). O arquivo de dados nunca viaja pela rede.
+4. **Processamento Local em Disco (Fase Map):** Cada Worker recebe a ordem de computação. Ele abre os chunks locais persistidos em seu próprio disco rígido, lê os bytes diretamente para a memória local do servidor e executa uma contagem de strings concorrente de alta velocidade. O nó calcula o número de ocorrências localmente e devolve para o Coordenador apenas um número inteiro leve (ex: "node1 encontrou 45 ocorrências"). O arquivo de dados nunca viaja pela rede.
 5. **Consolidação Mestre (Fase Reduce):** O Coordenador coleta as respostas numéricas leves vindas da periferia do cluster, executa a função de agregação matemática (soma vetorial de todas as parciais) e devolve o total final consolidado instantaneamente para a CLI do usuário.
 
 ---
@@ -208,158 +226,169 @@ Projetado para computação distribuída analítica sobre o ecossistema do DFS, 
 
 A robustez do DFS no Marco 3 repousa sobre a aplicação rigorosa de conceitos matemáticos e de engenharia de redes de computadores de sistemas distribuídos modernos.
 
-### 5.1 Fator de Replicação ($N=3$)
+### 5.1 Topologia do Cluster: $N=5$ Nós e Fator de Replicação $R=3$
 
-O Fator de Replicação estipula o nível de redundância física do cluster. Ao definir $N=3$, o sistema estabelece que para cada unidade de informação atômica injetada no ecossistema, devem coexistir três cópias exatas em domínios de falha isolados. Em ambientes de produção de larga escala, essa configuração garante que mesmo diante do colapso completo de um rack de servidores, os dados permaneçam acessíveis. No escopo do projeto, garante que até mesmo a perda catastrófica de nós inteiros de armazenamento não resulte em perda de persistência dos arquivos dos usuários.
+O sistema opera com **$N=5$ nós de armazenamento** e **fator de replicação $R=3$**. O fator $R=3$ estipula o nível de redundância física: para cada unidade de informação atômica injetada, coexistem três cópias em nós distintos, garantindo que a perda de até duas réplicas de um chunk não cause perda de dados. A escolha de $N=5$ não é arbitrária: $N=5$ é o **menor número de nós que dá graus de liberdade combinatórios reais** ao round-robin. Com $N=3$ e $R=3$, teríamos `min(R,N)=3`, o que colocaria todo chunk em todos os nós — não haveria o que balancear, justamente o foco do Marco 3. Com $N=5$ e $R=3$, cada chunk ocupa três dos cinco nós, e a janela de réplicas desliza ao longo do arquivo, distribuindo a carga de forma uniforme e exata.
 
-### 5.2 Consistência Forte via Modelo de Quórum Estrito ($W=2, R=2$)
+### 5.2 Consistência e o Modelo de Quórum ($W=2$ implementado; $R=2$ planejado)
 
-Para governar a consistência de dados sem depender de protocolos pesados e centralizados de travamento bidirecional (como Two-Phase Locking), o DFS implementa o Modelo de Quórum Descentralizado. O alicerce desse modelo baseia-se na inequação fundamental de sistemas distribuídos:
+Para governar a consistência de dados sem depender de protocolos pesados e centralizados de travamento bidirecional (como Two-Phase Locking), o DFS adota o Modelo de Quórum Descentralizado como referência teórica. O alicerce desse modelo baseia-se na inequação fundamental de sistemas distribuídos:
 
-$$W + R > N$$
+$$W + R > N_{replicas}$$
 
-Onde:
-- $N$ representa o Fator de Replicação do sistema ($N=3$).
-- $W$ representa o Quórum Mínimo de Escrita Estável ($W=2$).
-- $R$ representa o Quórum Mínimo de Leitura Consistente ($R=2$).
+Onde, no contexto de cada chunk:
+- $N_{replicas}$ representa o número de réplicas de um chunk ($=R=3$).
+- $W$ representa o Quórum Mínimo de Escrita Estável ($W=2$, **implementado**).
+- $R$ representa o Quórum Mínimo de Leitura Consistente ($R=2$, **planejado para o Marco 4**).
 
-Substituindo os valores parametrizados no sistema na equação, obtemos:
+Substituindo o objetivo de design ($W=2$, $R=2$, três réplicas), obtém-se $2 + 2 > 3 \implies 4 > 3$. Como a soma dos nós consultados na escrita com os nós consultados na leitura seria estritamente maior do que o número de réplicas, o Princípio da Casa dos Pombos garantiria que a leitura **obrigatoriamente faria interseção com pelo menos um nó** detentor da escrita mais recente, assegurando consistência forte (linearizável) — desde que combinada com versionamento e anti-entropia.
 
-$$2 + 2 > 3 \implies 4 > 3$$
+**Estado atual (Marco 3):** o quórum de **escrita** $W=2$ está implementado e validado (um chunk só é dado como gravado com 2 confirmações). A **leitura** ainda usa **failover sequencial** (tenta réplicas em ordem até obter o chunk), e não o quórum $R=2$ com comparação de versão. Em termos de CAP, o sistema prioriza segurança da escrita: se o quórum $W$ não é atingido, a operação falha em vez de gravar de forma inconsistente (preferência por consistência sobre disponibilidade de escrita, quadrante CP).
 
-Como a soma dos nós consultados na escrita com os nós consultados na leitura é estritamente maior do que o número total de réplicas existentes no cluster, o Princípio da Casa dos Pombos garante matematicamente que o conjunto de nós interceptados durante uma operação de leitura **obrigatoriamente fará interseção com pelo menos um nó** que participou da operação de escrita estável mais recente. 
+### 5.3 Placement Determinístico por Round-Robin (substituiu o Hashing)
 
+Para eliminar a necessidade de manter tabelas de roteamento pesadas e centralizadas para cada chunk, o DFS adota um **posicionamento round-robin determinístico** por índice de chunk, que **substituiu** o sharding por hash do Marco 2. A regra é pura e sem estado:
 
+$$\text{réplicas}(chunk_i) = [\, N[(i+0) \bmod N],\ N[(i+1) \bmod N],\ \dots,\ N[(i+R-1) \bmod N]\,]$$
 
-Essa interseção assegura consistência forte (linearidade), pois mesmo que o cluster possua nós desatualizados, a CLI fatalmente consultará pelo menos um nó detentor da versão correta, utilizando o mecanismo de anti-entropia para descartar os dados velhos e propagar a resposta legítima.
+A primeira réplica é o *primary*. Com $N=5$ e $R=3$: o chunk 0 vai para $[node1, node2, node3]$, o chunk 1 para $[node2, node3, node4]$, e assim por diante, com a janela deslizando circularmente. Isso assegura:
+- **Determinismo:** qualquer componente calcula a localização teórica de um bloco apenas a partir do seu índice, sem consultar tabelas.
+- **Uniformidade exata:** ao contrário do hash (que garante uniformidade apenas estatística), o round-robin produz espalhamento uniforme exato e uma sequência previsível, fácil de auditar na defesa.
 
-### 5.3 Sharding Determinístico Baseado em Hashing por Chunk
+**Invariante crítica:** a regra recebe SEMPRE a **membership canônica** (os 5 nós, na ordem fixa), nunca a lista de nós vivos. Se um nó cair e a lista virar 4, o `% N` mudaria e todos os chunks já gravados deixariam de ser encontrados. Liveness afeta de qual réplica se *lê* / para onde se *re-replica*, nunca a fórmula. A função de placement recebe `cluster_size` e falha alto se a lista divergir, blindando contra esse erro. Além disso, o placement é **calculado uma vez no write e persistido**; nenhuma operação posterior recalcula posicionamento — é o que viabiliza a elasticidade (um nó novo entra na membership e passa a receber uploads futuros, sem movimentar dados antigos).
 
-Para eliminar a necessidade de manter tabelas de roteamento pesadas, dinâmicas e centralizadas para cada chunk do sistema (o que degradaria a memória do Coordenador a longo prazo), o DFS adota sharding baseado em algoritmos de espalhamento hash. A chave de hash baseia-se na junção estrita do caminho lógico do arquivo no DFS com o índice sequencial do seu chunk:
+### 5.4 Versionamento Atômico de Arquivos `[Planejado — Marco 4]`
 
-$$\text{Chave} = \text{hash}(\text{logical\_path} + \text{str}(\text{chunk\_id}))$$
+O controle de versionamento operaria como o token imutável de validação para algoritmos de consistência de quórum de leitura. Quando ocorre uma mutação (`put`), um incremento de versão seria carimbado fisicamente junto ao chunk; durante um quórum de leitura $R=2$, um carimbo antigo (de um nó que ficou offline durante um PUT anterior) funcionaria como flag de invalidação, permitindo à CLI identificar e isolar o dado defasado (anti-entropia). **No Marco 3 isso ainda não está implementado** — a leitura usa failover sequencial e os chunks não carregam carimbo de versão. O versionamento e a anti-entropia são parte da evolução planejada para consistência forte linearizável (ver seção 14).
 
-Ao aplicar a operação matemática de módulo sobre a quantidade total de nós de armazenamento ativos registrados no cluster, o sistema obtém o índice do nó primário responsável por hospedar aquela réplica específica. As réplicas secundárias e terciárias são alocadas nos nós subsequentes da cadeia circular de armazenamento de forma determinística. Isso assegura:
-- Distribuição homogênea e balanceada da carga de armazenamento entre os discos dos nós.
-- Capacidade de qualquer componente calcular instantaneamente a localização teórica de um bloco sem necessidade de realizar consultas complexas a bancos de dados relacionais.
+### 5.5 Abandono de Sockets TCP Legados e as Duas Granularidades de Tamanho
 
-### 5.4 Versionamento Atômico de Arquivos
+O gRPC opera nativamente sobre conexões HTTP/2, trazendo vantagens brutas de performance como multiplexação de streams (várias requisições trafegando simultaneamente por uma única conexão TCP), compressão de cabeçalhos binários e mecanismos eficientes de keep-alive a nível de aplicação.
 
-O controle de versionamento opera como o token imutável de validação definitiva para os algoritmos de consistência de quórum. Quando ocorre uma mutação (`put`), o incremento da versão ocorre de maneira atômica no plano de controle. Ao persistir os dados, a string de versão é gravada em disco acoplada ao nome do arquivo físico. Se um nó de armazenamento sofrer uma queda, ficar indisponível por horas e retornar ao cluster, seus arquivos físicos ainda estarão carimbados com a versão antiga. Durante um quórum de leitura, esse carimbo antigo funcionará como uma flag de invalidação, permitindo que a CLI identifique e isole o nó defasado imediatamente.
+Por padrão de fábrica, o framework gRPC limita o tamanho de transmissão de mensagens individuais a 4 MB como salvaguarda de estouro de memória. A arquitetura do Marco 3 resolve isso de forma elegante **sem precisar mexer nesse limite**, através da separação de **duas granularidades de tamanho** distintas, que nunca devem ser confundidas:
 
-### 5.5 Abandono de Sockets TCP Legados e Tuning de Canais gRPC/HTTP2
+- **`CHUNK_SIZE = 4 MB` (a chunknização):** unidade de *placement e replicação*. Define em quantos chunks o arquivo é cortado e quantas entradas de metadado e rodadas de replicação ele gera. Chunks grandes reduzem o overhead de metadados (um arquivo de 256 MB gera 64 chunks com 4 MB, em vez de 4096 com 64 KB — redução de 64×) e respondem diretamente ao feedback do Marco 2 sobre escalar o tamanho do chunk.
+- **`STREAM_SIZE = 64 KB` (o pedaço de transporte):** quanto a CLI envia por mensagem gRPC ao subir/baixar. É pequeno de propósito: mantém o uso de memória baixo e fica **muito abaixo** do limite default de 4 MB do gRPC.
 
-O gRPC opera nativamente sobre conexões HTTP/2, trazendo vantagens brutas de performance como multiplexação de streams (várias requisições trafegando simultaneamente por uma única conexão TCP), compressão de cabeçalhos binários e mecanismos eficientes de keep-alive a nível de aplicação. 
-
-No entanto, por padrão de fábrica, o framework gRPC limita o tamanho de transmissão de mensagens individuais a 4MB como salvaguarda de estouro de memória. Como um DFS lida nativamente com grandes volumes de dados binários, essa limitação paralisaria o tráfego de chunks densos. Para sanar essa restrição de forma elegante, a arquitetura do Marco 3 introduz uma camada de sintonia fina (*tuning*) através da injeção do dicionário de inicialização `GRPC_OPTIONS`. Configura-se explicitamente os parâmetros de controle de tamanho máximo de envio e recebimento de mensagens para **64MB**:
-
-- `grpc.max_send_message_length`: Configurado para `64 * 1024 * 1024` bytes.
-- `grpc.max_receive_message_length`: Configurado para `64 * 1024 * 1024` bytes.
-
-Essa modificação arquitetural viabilizou o tráfego fluido de dados em alta velocidade, blindando o ecossistema distribuído contra exceções críticas de exaustão de recursos (`RESOURCE_EXHAUSTED`).
+**Consequência arquitetural:** como todo o tráfego pesado é fatiado em pedaços de `STREAM_SIZE` (64 KB), nenhuma mensagem individual jamais se aproxima do teto de 4 MB do gRPC. Por isso, **a configuração `GRPC_OPTIONS` de aumento de `max_send/receive_message_length` é desnecessária e não é utilizada** neste projeto — o problema clássico de `RESOURCE_EXHAUSTED` por mensagem grande simplesmente não acontece, pois o re-agrupamento em chunks de 4 MB é feito em memória pelo ingress, a partir de um stream de mensagens de 64 KB. Essa decisão (transporte fino + chunk grosso) substitui a antiga abordagem de inflar o limite de mensagem para 64 MB.
 
 ---
 
 ## 🗂️ 6. Mapeamento e Análise Granular da Estrutura do Projeto
 
-Abaixo encontra-se a árvore de diretórios oficial do ecossistema do DFS no Marco 3, detalhando minuciosamente a função lógica de cada componente:
+Abaixo encontra-se a árvore de diretórios oficial do ecossistema do DFS no Marco 3, **já no estado integrado**, detalhando minuciosamente a função lógica de cada componente. Note que os artefatos legados do Marco 2 (`sharding.py`, `node_service.py`, `node_client.py`, `file_service.py`) foram **aposentados** na integração e substituídos pela organização por papel técnico abaixo:
 
 ```text
 MARCO3/
 ├── .venv/                               # Ambiente virtual isolado Python 3 contendo interpretador e libs.
 ├── DFS_M3/                              # Diretório mestre que encapsula o código-fonte do pacote DFS.
-│   ├── pyproject.toml                   # Arquivo de especificação de metadados, build-system e empacotamento moderno.
-│   ├── requirements.txt                 # Listagem de dependências de produção (grpcio e grpcio-tools).
+│   ├── pyproject.toml                   # Especificação de metadados, build-system e empacotamento moderno.
+│   ├── requirements.txt                 # Dependências (protobuf e grpcio-tools).
 │   │
 │   ├── data/                            # Subpastas destinadas à simulação de persistência em disco rígido.
-│   │   ├── metadata/                    # Diretório restrito de armazenamento físico do Control Plane (Coordenador).
+│   │   ├── metadata/                    # Diretório do Control Plane (Coordenador).
 │   │   │   └── metadata_index.json      # O banco de dados JSON centralizador de todo o índice lógico do DFS.
-│   │   └── nodes/                       # Diretórios simulando discos físicos independentes dos servidores Workers.
-│   │       ├── node1/                   # Partição de armazenamento físico isolada pertencente ao Nó 1.
-│   │       ├── node2/                   # Partição de armazenamento físico isolada pertencente ao Nó 2.
-│   │       └── node3/                   # Partição de armazenamento físico isolada pertencente ao Nó 3.
+│   │   └── nodes/                       # Diretórios simulando discos físicos independentes dos Workers.
+│   │       ├── node1/chunks/            # Partição de armazenamento isolada do Nó 1 (chunks/<chunk_id>).
+│   │       ├── node2/chunks/            # Partição de armazenamento isolada do Nó 2.
+│   │       ├── node3/chunks/            # Partição de armazenamento isolada do Nó 3.
+│   │       ├── node4/chunks/            # Partição de armazenamento isolada do Nó 4.
+│   │       └── node5/chunks/            # Partição de armazenamento isolada do Nó 5.
 │   │
-│   ├── dfs/                             # Módulo Python principal que centraliza o core logicial do sistema.
-│   │   ├── __init__.py                  # Arquivo padrão para sinalizar ao interpretador que a pasta é um pacote importável.
-│   │   ├── config.py                    # Ficheiro de constantes globais (portas sockets, CHUNK_SIZE, GRPC_OPTIONS).
-│   │   ├── client.py                    # Implementação da classe cliente gRPC persistente utilizada pela interface da CLI.
+│   ├── dfs/                             # Módulo Python principal que centraliza o core lógico do sistema.
+│   │   ├── __init__.py                  # Sinaliza ao interpretador que a pasta é um pacote importável.
+│   │   ├── __main__.py                  # Entry point do pacote: viabiliza `python -m dfs <cmd>`.
+│   │   ├── config.py                    # Constantes globais (portas, N=5, R=3, CHUNK_SIZE, STREAM_SIZE, heartbeat).
+│   │   ├── client.py                    # DataClient (cliente do nó-gateway) + reexporta ControlClient.
 │   │   │
 │   │   ├── application/                 # Camada de serviços lógicos de regras de negócio de alto nível.
-│   │   │   ├── file_service.py          # Implementação gRPC do Coordenador: Roteamento, Quórum e Versionamento.
 │   │   │   ├── metadata_service.py      # Operações transacionais de leitura/escrita no JSON de metadados mestre.
-│   │   │   ├── node_service.py          # Servicer gRPC acoplado aos nós: Gerencia chamadas WriteChunk e ReadChunk.
-│   │   │   ├── mapreduce_service.py     # [Não Feito] Master Engine: Orquestração analítica baseada em localidade física.
-│   │   │   └── node_compute_service.py  # [Não Feito] Worker Engine: Varredura local concorrente em disco para tarefas Map.
+│   │   │   ├── data_service.py          # DataServicer: nó como ingress (PUT) e egress (GET); fan-out e failover.
+│   │   │   ├── replication_service.py   # ReplicationServicer: CRUD de chunks no disco (Store/Fetch/Delete/List).
+│   │   │   ├── mapreduce_service.py      # [Não Feito] Master Engine: orquestração analítica por localidade física.
+│   │   │   └── node_compute_service.py   # [Não Feito] Worker Engine: varredura local concorrente para tarefas Map.
 │   │   │
-│   │   ├── cluster/                     # Camada responsável pelo gerenciamento de topologia do cluster distribuído.
-│   │   │   ├── node_client.py           # Abstração de canais de comunicação internos Coordenador -> Nós (East-West).
-│   │   │   ├── node_registry.py         # Mapeamento e cadastro dinâmico de endereços sockets, IDs e vitalidade dos nós.
-│   │   │   └── sharding.py              # Algoritmo matemático de espalhamento determinístico por hash de chunks.
+│   │   ├── cluster/                     # Camada responsável pelo gerenciamento de topologia do cluster.
+│   │   │   ├── node_registry.py         # Membership canônica (estática) + estado vivo (heartbeat: ALIVE/SUSPECT/DEAD).
+│   │   │   ├── placement.py             # Round-robin determinístico (fonte de verdade do posicionamento).
+│   │   │   ├── plan_store.py             # PlanStore + DataPlaneServicer (handoff do plano CLI -> nó).
+│   │   │   ├── control_client.py         # Cliente do ControlService (usado por nó e CLI).
+│   │   │   └── replication_client.py     # Cliente do ReplicationService (coordenador: deleção; nós: fan-out/fetch).
 │   │   │
 │   │   ├── interface/                   # Camada exposta para inicialização de processos e interação com o usuário.
-│   │   │   ├── cli.py                   # Parsing de argumentos de comandos e loop interativo estável da CLI.
-│   │   │   ├── server.py                # Inicializador do servidor gRPC mestre do Coordenador (Porta 50051).
-│   │   │   └── storage_node.py          # Lançador unificado do servidor gRPC dos Nós de Armazenamento (Portas 50052+).
+│   │   │   ├── cli.py                   # Parsing de argumentos, menu interativo e loop com cliente persistente.
+│   │   │   ├── server.py               # Inicializador do servidor gRPC do Coordenador (ControlService, porta 9100).
+│   │   │   └── storage_node.py          # Lançador dos Nós (Data + Replication + DataPlane na mesma porta; heartbeat).
 │   │   │
 │   │   ├── storage/                     # Camada de interação de baixo nível com o hardware hospedeiro.
-│   │   │   └── local_storage.py         # Abstração física de I/O de bytes em formato binário e limpeza de subpastas vazias.
+│   │   │   └── local_storage.py         # I/O de bytes em binário; API por caminho lógico e por chunk_id.
 │   │   │
-│   │   └── pb/                          # Diretório contendo os artefatos compilados pelo compilador de Protocol Buffers.
-│   │       ├── __init__.py              # Arquivo de inicialização de pacote para as classes compiladas de rede.
-│   │       ├── dfs_pb2.py               # Classes de dados de mensagens binárias geradas automaticamente pelo Protobuf.
-│   │       └── dfs_pb2_grpc.py          # Interfaces stubs de clientes e servicers geradas pelo framework gRPC.
+│   │   └── pb/                          # Artefatos de contrato e código compilado pelo Protocol Buffers.
+│   │       ├── __init__.py              # Inicialização de pacote para as classes compiladas de rede.
+│   │       ├── dfs.proto               # Contrato compartilhado: os três serviços principais (fonte de verdade).
+│   │       ├── dataplane.proto          # Contrato interno do plano de dados (handoff do plano de chunks).
+│   │       ├── dfs_pb2.py / dfs_pb2_grpc.py            # Gerados a partir de dfs.proto. NÃO editar à mão.
+│   │       └── dataplane_pb2.py / dataplane_pb2_grpc.py # Gerados a partir de dataplane.proto. NÃO editar à mão.
 │   │
-│   ├── proto/                           # Diretório detentor das especificações agnósticas de contratos de interface.
-│   │   └── dfs.proto                    # O arquivo de especificação IDL original que dita as regras de mensagens do cluster.
+│   ├── scripts/                         # Automações secundárias e rotinas auxiliares do sistema.
+│   │   └── start_coordinator.py         # Atalho para subir apenas o coordenador (testes/demonstrações).
 │   │
-│   ├── scripts/                         # Automações secundárias e rotinas auxiliares do sistema de arquivos.
-│   │   └── run_benchmarks.py            # [Não Feito] Script de testes para avaliação de throughput por variação de chunk.
+│   ├── tests/                           # Testes manuais e mocks de isolamento (data plane x control plane).
+│   │   ├── mocks/                       # mock_coordinator.py e mock_node.py (espelhos para testar cada plano).
+│   │   ├── test_local_storage_chunks.py # Round-trip por chunk_id no disco local.
+│   │   ├── test_replication_mock.py     # Fan-out e fetch entre réplicas (StoreChunk/FetchChunk).
+│   │   ├── test_end_to_end.py           # PUT/GET/LS/DELETE ponta a ponta com coordenador-mock.
+│   │   └── test_list_files.py           # ListFiles montando FileEntry corretamente.
 │   │
-│   └── docs/                            # Documentação técnica profunda e relatórios de métricas do sistema.
-│       ├── decisoes_marco3.md           # [Não Feito] Memorial descritivo com defesa arquitetural detalhada perante o CAP.
-│       └── benchmark_report.md          # [Não Feito] Relatório analítico consolidado com gráficos de carga e latência de rede.
+│   └── ARQUITETURA.md                   # Documento de arquitetura "como implementado" (referência viva).
 │
 ├── README.md                            # Este exaustivo manual de engenharia e operações técnicas.
-├── run_cluster.py                       # Orquestrador mestre assíncrono para subir as 4 instâncias gRPC locais.
-└── run_cli.py                           # Ponto de entrada simplificado global para execução de comandos do Data Plane.
+├── run_cluster.py                       # Orquestrador mestre para subir os 5 nós + o coordenador.
+└── run_cli.py                           # Ponto de entrada simplificado global para comandos do Data Plane.
 ```
 
 ---
 
 ## 🧭 7. O Que Faz Cada Arquivo: Análise Granular Detalhada
 
-Esta seção provê uma autópsia técnica detalhada sobre a responsabilidade funcional interna de cada arquivo que compõe o ecossistema de software do DFS no Marco 3.
+Esta seção provê uma autópsia técnica detalhada sobre a responsabilidade funcional interna de cada arquivo que compõe o ecossistema de software do DFS no Marco 3, já no estado integrado.
 
 ### 7.1 Arquivos do Diretório Raiz `MARCO3/`
 
-- **`run_cluster.py`:** Atua como o maestro de processos da infraestrutura local. Utilizando o módulo assíncrono `subprocess` do Python, ele inicializa de forma concorrente e isolada quatro processos de sistema operacional independentes: uma instância do Coordenador gRPC (porta 50051) e três instâncias distintas de Nós de Armazenamento (portas 50052, 50053 e 50054). O script intercepta as saídas padrão (`stdout` e `stderr`) de todos esses subprocessos e as canaliza de forma multiplexada para um terminal de console unificado, formatando os logs com cores e prefixos identificadores, facilitando a depuração visual do comportamento interno do cluster em tempo real.
-- **`run_cli.py`:** Funciona como o portal de teletransporte para o usuário final. Ele captura os argumentos repassados na linha de comando na raiz do projeto, ajusta as variáveis de caminhos lógicos do sistema no dicionário `sys.path` e delega a execução diretamente para o interpretador de comandos interno do pacote `dfs`, permitindo a invocação limpa dos fluxos operacionais sem exigir navegação interna de pastas por parte do usuário.
+- **`run_cluster.py`:** Atua como o maestro de processos da infraestrutura local. Utilizando o módulo `subprocess` do Python, ele inicializa de forma concorrente e isolada os processos do cluster: as **cinco** instâncias de Nós de Armazenamento (portas 9101 a 9105) e, **em seguida**, a instância do Coordenador (porta 9100). Os nós sobem antes do coordenador de propósito — assim, quando o coordenador começa a processar requisições, os nós já estão prontos; os primeiros heartbeats podem falhar com um aviso inofensivo até o coordenador subir, pois o heartbeat tem retry e os nós entram como ALIVE no ciclo seguinte. O script lê `NODE_ORDER` do `config.py`, então adicionar nós no config faz o runner subi-los automaticamente, sem editar o runner.
+- **`run_cli.py`:** Funciona como o portal de entrada para o usuário final. Ele insere `DFS_M3/` no `sys.path`, importa dinamicamente o módulo `dfs.interface.cli` e delega a execução para o seu `main`, permitindo a invocação limpa dos fluxos operacionais (`put`/`get`/`list`/`rm`/`menu`) sem exigir navegação interna de pastas. Sem argumentos, abre o **modo interativo persistente**.
 
 ### 7.2 Arquivos do Core Package `DFS_M3/dfs/`
 
-- **`config.py`:** Centraliza as variáveis de configuração que ditam o comportamento de todo o cluster distribuído. Define mapeamentos estáticos de endereços IP locais (`127.0.0.1`), portas sockets reservadas para cada participante do sistema, o valor numérico rígido do fator de replicação ($N=3$), a parametrização do tamanho limite do bloco lógico de corte (`CHUNK_SIZE`), além de instanciar a estrutura mutável `GRPC_OPTIONS`. Esta estrutura configura explicitamente as janelas máximas de tráfego HTTP/2 de entrada e saída para 64MB, blindando o sistema contra estouros de buffer e exceções prematuras de exaustão de capacidade física de transporte.
-- **`client.py`:** Implementa a inteligência do cliente gRPC utilizado pela interface CLI. É encarregado de encapsular a instanciação física dos stubs gerados pelo compilador e gerenciar o ciclo de vida dos canais de comunicação. Possui a lógica complexa de fatiar arquivos locais em fluxos de bytes puros e realizar o streaming direto ponto a ponto com as APIs gRPC dos Workers de armazenamento, executando fallbacks de rede automáticos e validações matemáticas de quórum na leitura e na escrita.
+- **`config.py`:** Centraliza as variáveis que ditam o comportamento de todo o cluster: endereço e porta do Coordenador (`127.0.0.1:9100`), porta base dos nós (`9101`, com node1→9101 … node5→9105), o número de nós (`NODE_COUNT = 5`), o fator de replicação (`REPLICATION_FACTOR = 3`), as duas granularidades de tamanho (`CHUNK_SIZE = 4 MB` e `STREAM_SIZE = 64 KB`), os limiares de heartbeat (`HEARTBEAT_INTERVAL = 2s`, `HEARTBEAT_SUSPECT = 4s`, `HEARTBEAT_DEAD = 8s`) e os caminhos de dados. A configuração dos nós é gerada dinamicamente por `build_nodes(NODE_COUNT)`. **Não há `GRPC_OPTIONS`** — por design, o transporte fatiado em 64 KB torna desnecessário inflar o limite de mensagem do gRPC.
+- **`client.py`:** Implementa o `DataClient`, o cliente gRPC do nó-gateway. Encapsula os stubs do `DataService` e do `DataPlaneService` na mesma conexão e provê os métodos do plano de dados: `set_upload_plan`/`set_download_plan` (handoff), `upload` (gera o stream de `UploadChunk` em pedaços de `STREAM_SIZE`) e `download` (consome o stream de `DownloadChunk` e concatena os bytes). Reexporta o `ControlClient` para a CLI.
+- **`__main__.py`:** Entry point do pacote, viabilizando `python -m dfs <comando>`. Apenas importa e chama o `main` da CLI.
 
 ### 7.3 Camada `application/` (Lógica de Serviços)
 
-- **`file_service.py`:** Aloja a implementação concreta da classe abstrata Servicer gerada a partir do contrato Protobuf para o plano de controle. Ele traduz os métodos remotos RPC expostos pelo Coordenador (como `RegisterWrite`, `GetMetadata`, `DeleteRequest`). Contém o cerne algorítmico que manipula atomicamente os números de versão dos arquivos, assegura a consistência lógica mestre do cluster e gerencia os locks lógicos necessários para impedir condições de corrida durante operações de escrita simultâneas no ecossistema.
-- **`metadata_service.py`:** É o motor transacional de persistência do Coordenador. Ele gerencia o arquivo `metadata_index.json` localizado em `data/metadata/`. Provê métodos síncronos e protegidos por semáforos para leitura ultrarrápida do índice de arquivos em memória, atualização de estruturas de mapas de shards e gravação atômica em disco. Também incorpora algoritmos para mapeamento de afinidade espacial, calculando quais nós possuem maior densidade de dados locais para subsidiar decisões computacionais do MapReduce.
-- **`node_service.py`:** Implementa a classe Servicer gRPC executada nos servidores de armazenamento (Workers). É responsável por expor as interfaces operacionais de I/O físico manipuladas diretamente pelo cliente. Ele traduz as chamadas de streaming remoto `WriteChunk` (recebendo bytes contínuos e vertendo-os para o gerenciador de disco local) e `ReadChunk` (abrindo buffers locais, extraindo bytes e carimbando-os com tags de versão antes de jogá-los no canal HTTP/2).
-- **`mapreduce_service.py` `[Não Feito]`:** Componente de alto nível acoplado ao Coordenador que atua como o Master do motor de processamento distribuído. Sua função é fracionar uma consulta analítica textual, interrogar o `metadata_service` para mapear a localidade física de cada bloco pertencente ao arquivo alvo, instanciar stubs gRPC de computação interna e disparar chamadas assíncronas concorrentes de processamento para os Workers, aguardando os retornos numéricos leves para computar a agregação matemática final (*Reduce*).
-- **`node_compute_service.py` `[Não Feito]`:** Serviço operário acoplado ao servidor de armazenamento que intercepta os sinais computacionais enviados pelo Master do MapReduce. Ele implementa threads de varredura que abrem localmente os arquivos de extensão `.chunk` no disco rígido local do nó, aplicam expressões regulares ou filtros lineares de string em alta velocidade direto na memória ram da máquina hospedada e devolvem resultados numéricos consolidados de frequências de termos, sem gerar tráfego de rede volumoso.
+- **`metadata_service.py`:** É o motor transacional de persistência do Coordenador. Gerencia o `metadata_index.json` em `data/metadata/`, com métodos protegidos por lock para leitura, gravação (`put_file`, que recebe o caminho, o tamanho total em bytes e a lista de chunks com suas réplicas), busca, deleção e listagem. Mantém, por arquivo, o tamanho total, a lista de chunks e um bloco de distribuição (`chunk_count`, `nodes_used`). Não conhece tipos do protobuf — quem chama (o `ConfirmUpload`) converte os `ChunkPlacement` em dicionários simples antes de gravar, mantendo a camada de metadados desacoplada do gRPC.
+- **`data_service.py`:** Implementa o `DataServicer`, a interface de streaming da CLI com o nó. No `UploadFile`, o nó age como **ingress**: carrega o plano do `PlanStore` pelo `upload_id`, reagrupa os bytes do stream em chunks de `CHUNK_SIZE`, grava localmente se for réplica, dispara o fan-out paralelo (`StoreChunk`) para as demais réplicas, valida o quórum $W=2$ e chama `ConfirmUpload` no coordenador. No `DownloadFile`, o nó age como **egress**: carrega o plano pelo `download_id`, monta o arquivo lendo chunks locais e buscando os faltantes em peers (`FetchChunk`, com failover sequencial), emitindo o stream em ordem.
+- **`replication_service.py`:** Implementa o `ReplicationServicer`, a comunicação nó-a-nó (e o coordenador, para deleção). Expõe `StoreChunk` (recebe um chunk em stream e o grava), `FetchChunk` (lê um chunk local e o emite em pedaços de `STREAM_SIZE`), `DeleteChunk` (apaga um chunk do disco) e `ListChunks` (inventário local para diagnóstico).
+- **`mapreduce_service.py` `[Não Feito]`:** Componente de alto nível acoplado ao Coordenador que atuaria como o Master do motor de processamento distribuído, fracionando uma consulta analítica, mapeando a localidade física de cada bloco, disparando tarefas de computação aos Workers e consolidando os retornos (*Reduce*).
+- **`node_compute_service.py` `[Não Feito]`:** Serviço operário acoplado ao Worker que interceptaria os sinais do Master do MapReduce, abrindo localmente os chunks no disco, aplicando filtros em memória (*Map*) e devolvendo resultados numéricos leves, sem gerar tráfego pesado de rede.
 
 ### 7.4 Camada `cluster/` (Gerenciamento de Topologia)
 
-- **`node_registry.py`:** Gerencia a tabela estática e dinâmica de participantes do cluster. Mantém o mapeamento rigoroso que correlaciona o ID exclusivo de um nó (ex: `Node_1`) com a sua respectiva porta socket gRPC ativa e o seu diretório físico de isolamento de dados no sistema operacional, servindo como o dicionário definitivo de consulta de presença do cluster.
-- **`sharding.py`:** Contém a função matemática pura de distribuição hashing do ecossistema. Ela recebe a string do caminho lógico de um arquivo fundida ao ID numérico do chunk, calcula o hash criptográfico ou numérico correspondente e aplica a operação aritmética de módulo sobre o total de nós funcionais do sistema. Esse cálculo retorna de forma determinística os três nós ordenados encarregados de abrigar as réplicas do respectivo bloco, garantindo espalhamento homogêneo e balanceamento de carga de disco nativo no ecossistema.
-- **`node_client.py`:** Abstração de cliente gRPC embutida para comunicações internas privadas do cluster (*Control Plane to Workers*). É utilizada pelo Coordenador para estabelecer canais remotos privados com os nós de armazenamento, permitindo o despacho de ordens administrativas assíncronas de expurgamento físico de arquivos (`PurgeFile`) ou sinalizações de controle de processamento computacional.
+- **`node_registry.py`:** Gerencia o catálogo de nós com duas responsabilidades rigidamente separadas: a **membership canônica** (estática, lida do config, sempre na mesma ordem — é o que o placement consome) e o **estado vivo** (dinâmico, atualizado por `register_node` e `record_heartbeat`). Classifica cada nó como ALIVE, SUSPECT ou DEAD pelo tempo de silêncio desde o último batimento, num cálculo preguiçoso feito na hora da consulta, sem thread de fundo. Expõe `canonical_members()` (para placement) e `alive_members()` (para roteamento de ingress/egress).
+- **`placement.py`:** Contém a função pura de distribuição round-robin determinística do ecossistema. `replicas_for_chunk(chunk_index, nodes, R, cluster_size)` devolve as réplicas de um chunk pela regra `(i+offset) % N`; `primary_replica` devolve só o primary; `ingress_for_file` escolhe o ingress por round-robin entre arquivos. Recebe `cluster_size` explicitamente como blindagem: se a lista divergir da membership canônica, estoura em vez de calcular errado. Substitui o `sharding.py` por hash do Marco 2.
+- **`plan_store.py`:** Implementa o `PlanStore` (mapa em memória, protegido por lock, de `upload_id`/`download_id` → plano de chunks, com limpeza após a operação) e o `DataPlaneServicer`, que atende `SetUploadPlan`/`SetDownloadPlan`. É a peça que materializa o handoff do plano da CLI para o nó, descrito na seção 6 do guia de arquitetura.
+- **`control_client.py`:** Cliente gRPC do `ControlService`, usado tanto pelo **nó** (`register`, `heartbeat`, `confirm_upload`) quanto pela **CLI** (`request_upload`, `request_download`, `delete_file`, `list_files`). Endereço default lido do `config.py`.
+- **`replication_client.py`:** Reúne os dois clientes do `ReplicationService` na mesma camada: as funções de nível de coordenador (`delete_node_chunks`/`delete_one_chunk`, usadas no `DeleteFile` para comandar a deleção física, reusando um canal por nó) e a classe `ReplicationClient` (usada pelos nós no fan-out do PUT via `store_chunk` e no failover do GET via `fetch_chunk`). Tudo trafega em pedaços de `STREAM_SIZE`.
 
-### 7.5 Camada `storage/` e Artefatos Compilados `pb/` / `proto/`
+### 7.5 Camada `interface/`, `storage/` e Artefatos Compilados `pb/`
 
-- **`local_storage.py`:** A camada de mais baixo nível do sistema, que interage diretamente com as APIs de I/O de arquivos do sistema operacional hospedeiro. Executa operações atômicas de criação de arquivos binários de escrita em blocos (`wb`) e leitura binária sequencial (`rb`) sob isolamento estrito de caminhos. Incorpora algoritmos de remoção recursiva que vasculham a árvore física de diretórios locais do nó e destróem pastas vazias geradas após operações massivas de remoção de dados (`rm`).
-- **`dfs_pb2.py`:** Código Python gerado automaticamente pelo compilador `protoc` do Protocol Buffers a partir das especificações do arquivo `dfs.proto`. Contém as classes de dados de mensagens estruturadas binárias altamente otimizadas, responsáveis por realizar a serialização e desserialização rápida de dados em tempo de execução. **Não deve ser editado manualmente.**
-- **`dfs_pb2_grpc.py`:** Código de infraestrutura de rede gerado automaticamente pelo compilador gRPC. Fornece os stubs de comunicação cliente e as classes abstratas base (*Servicers*) necessárias para a montagem e inicialização dos servidores HTTP/2 gRPC do Coordenador e dos Nós de Armazenamento. **Não deve ser editado manualmente.**
-- **`dfs.proto`:** O contrato definitivo IDL (Interface Definition Language) do ecossistema. Especifica de forma estrita e agnóstica de linguagem todas as estruturas de mensagens trocadas no cluster (pedidos de escrita, respostas de metadados, streams binários de chunks) e declara as assinaturas de procedimentos de serviços que governam a interação de todo o cluster distribuído do DFS.
+- **`cli.py`:** Interface de linha de comando. Faz o parsing dos comandos (`put`/`get`/`list`/`rm`/`menu`), exibe o menu interativo formatado e mantém o loop de sessão. Implementa o fluxo de **três chamadas** do Marco 3 e mantém um **cliente persistente** (um único `ControlClient` reusado em toda a sessão interativa; o `DataClient` é aberto por operação, pois o nó-gateway varia por arquivo). Envolve cada comando em tratamento de `grpc.RpcError` para que a sessão não morra se um nó/coordenador estiver fora.
+- **`server.py`:** Inicializador do servidor gRPC do Coordenador. Implementa o `ControlServiceServicer` com as sete RPCs do plano de controle (`RegisterNode`, `Heartbeat`, `RequestUpload`, `ConfirmUpload`, `RequestDownload`, `DeleteFile`, `ListFiles`), usando o `NodeRegistry`, o `placement.py`, o `MetadataService` e o `replication_client`. Registra **`ControlServiceServicer`** (não mais o legado `DFSService`) e escuta em `127.0.0.1:9100`.
+- **`storage_node.py`:** Lançador de um Nó de Armazenamento. Sobe, na **mesma porta**, os três serviços do nó (`DataService`, `ReplicationService`, `DataPlaneService`) e dispara, em background, o registro e o heartbeat junto ao coordenador (a cada `HEARTBEAT_INTERVAL`, com o block report do inventário de chunks). Uso: `python -m dfs.interface.storage_node --node-id node1`.
+- **`local_storage.py`:** Camada de I/O de baixo nível. Mantém a API legada por caminho lógico (`put`/`get`/`delete`/`list_files`) e adiciona a API por `chunk_id` (`store_chunk`/`read_chunk`/`has_chunk`/`delete_chunk`/`list_chunk_ids`), gravando cada chunk em `chunks/<chunk_id>` **sem extensão** (para casar com o regex `_chunk_\d+$` do observer). Garante isolamento de caminhos contra *path traversal* e remove subpastas vazias após deleções.
+- **`dfs.proto`:** Contrato definitivo IDL do ecossistema (pacote `dfs.v1`), fonte de verdade dos três serviços principais (`ControlService`, `DataService`, `ReplicationService`) e de todas as mensagens. **Não deve ser editado sem coordenação prévia da dupla.**
+- **`dataplane.proto`:** Contrato interno do plano de dados (pacote `dfs.dataplane`). Declara o `DataPlaneService` (`SetUploadPlan`/`SetDownloadPlan`) e reusa `ChunkPlacement` e `Ack` do `dfs.proto` via import, sem redefinir nada. Separado de propósito, para manter o contrato compartilhado e os stubs do coordenador intocados.
+- **`dfs_pb2.py` / `dfs_pb2_grpc.py` / `dataplane_pb2.py` / `dataplane_pb2_grpc.py`:** Código gerado automaticamente pelo compilador `grpc_tools.protoc` a partir dos `.proto`. Contêm as classes de mensagens e os stubs/servicers de rede. **Não devem ser editados manualmente** — sempre regenerar (ver seção 8, Step 4).
 
 ---
 
@@ -399,31 +428,33 @@ pip install -r DFS_M3/requirements.txt
 ```
 
 ### Step 4: Compilação Manual do Contrato IDL (Protobuf / gRPC)
-Sempre que o arquivo de especificação de interfaces de rede `DFS_M3/dfs/pb/dfs.proto` sofrer qualquer tipo de modificação de atributos ou adição de assinaturas RPC, mude temporariamente o escopo de diretório e invoque a ferramenta do compilador nativo para atualizar o pacote interno de stubs `pb/`:
+Sempre que um dos arquivos de especificação (`DFS_M3/dfs/pb/dfs.proto` ou `DFS_M3/dfs/pb/dataplane.proto`) sofrer qualquer modificação, mude o escopo para a raiz do pacote (`DFS_M3/`) e recompile **os dois** `.proto`. É **obrigatório** usar `-I=.` (e não `-I=dfs/pb`), pois é isso que faz o `protoc` gerar o import qualificado `from dfs.pb import dfs_pb2`; com `-I=dfs/pb` ele geraria `import dfs_pb2` (plano), que quebra em tempo de execução com `ModuleNotFoundError`:
 ```bash
 cd DFS_M3
-python -m grpc_tools.protoc -I=dfs/pb --python_out=./dfs/pb --grpc_python_out=./dfs/pb dfs/pb/dfs.proto
+python -m grpc_tools.protoc -I=. --python_out=. --grpc_python_out=. dfs/pb/dfs.proto
+python -m grpc_tools.protoc -I=. --python_out=. --grpc_python_out=. dfs/pb/dataplane.proto
 cd ..
 ```
+*(O `dataplane_pb2` reusa `dfs.v1.ChunkPlacement` e `dfs.v1.Ack` via `from dfs.pb import dfs_pb2`; por isso a ordem e o `-I=.` importam. Nunca edite os arquivos `*_pb2*.py` à mão.)*
 
 ### Step 5: Inicializar os Diretórios Físicos do Simulador de Discos
-Garanta a existência prévia da árvore de diretórios necessária para simular o isolamento físico dos storages locais dos nós e da pasta de metadados mestre do Coordenador:
+Garanta a existência prévia da árvore de diretórios necessária para simular o isolamento físico dos storages locais dos cinco nós e da pasta de metadados mestre do Coordenador (o sistema também cria as pastas sob demanda, mas é bom garantir):
 ```bash
 mkdir -p DFS_M3/data/metadata
-mkdir -p DFS_M3/data/nodes/node1
-mkdir -p DFS_M3/data/nodes/node2
-mkdir -p DFS_M3/data/nodes/node3
+mkdir -p DFS_M3/data/nodes/node1 DFS_M3/data/nodes/node2 DFS_M3/data/nodes/node3
+mkdir -p DFS_M3/data/nodes/node4 DFS_M3/data/nodes/node5
 ```
+> **Dica de higiene:** ao mudar `NODE_COUNT` ou ao migrar de uma versão antiga dos metadados, apague `DFS_M3/data/metadata/*` e `DFS_M3/data/nodes/*` antes de subir o cluster — dados gravados sob um placement diferente ficam inacessíveis e poluem o `list`.
 
 ### Step 6: Lançar e Subir o Cluster gRPC Completo Online
-Para colocar toda a infraestrutura distribuída online em uma única chamada de console, invoque o script centralizador de subprocessos assíncronos:
+Para colocar toda a infraestrutura distribuída online em uma única chamada de console, invoque o script centralizador de subprocessos:
 ```bash
 python run_cluster.py
 ```
-*Atenção extrema: Este terminal passará a cuspir logs concorrentes unificados gerados simultaneamente pelo Coordenador e pelos 3 nós de armazenamento ativos. Mantenha esta janela aberta e intocada durante toda a sua simulação de testes.*
+*Atenção: este terminal passará a cuspir logs concorrentes unificados gerados simultaneamente pelo Coordenador e pelos 5 nós de armazenamento ativos. Mantenha esta janela aberta e intocada durante toda a sua simulação de testes. É normal ver um aviso inicial de heartbeat falhando até o coordenador subir (os nós sobem antes); o retry resolve no ciclo seguinte.*
 
 ### Step 7: Interagir com o DFS via Interface CLI
-Abra uma janela de terminal completamente independente, garanta a ativação prévia da sua `venv` corporativa e execute comandos operacionais utilizando o lançador unificado do Data Plane:
+Abra uma janela de terminal completamente independente, garanta a ativação prévia da sua `venv` e execute comandos operacionais utilizando o lançador unificado do Data Plane:
 ```bash
 python run_cli.py <comando> [argumentos]
 ```
@@ -435,152 +466,153 @@ python run_cli.py <comando> [argumentos]
 ### 9.1 Preparar um Arquivo Local para Testes de Transmissão
 Gere um arquivo textual contendo dados arbitrários na raiz do projeto para servir de cobaia de I/O distribuído:
 ```bash
-echo "Sistemas distribuidos e replicados utilizando quorum estrito gRPC Marco 3" > DFS_M3/teste.txt
+echo "Sistemas distribuidos e replicados utilizando gateway e round-robin gRPC Marco 3" > DFS_M3/teste.txt
 ```
 
 ### 9.2 Injetar o Arquivo Local no Ecossistema DFS (PUT)
 Envie o arquivo local para uma rota virtual parametrizada dentro da árvore lógica do sistema de arquivos distribuído:
 ```bash
-python run_cli.py put DFS_M3/teste.txt /documentos/financeiro/dados.txt
+python run_cli.py put DFS_M3/teste.txt documentos/financeiro/dados.txt
 ```
 
 ### 9.3 Auditar o Índice e Metadados Globais do Cluster (LIST)
-Consulte o estado de registro lógico atualizado para checar a existência, tamanho consolidado e versão do arquivo injetado:
+Consulte o estado de registro lógico atualizado para checar a existência, tamanho consolidado, número de chunks e nós que guardam o arquivo injetado:
 ```bash
 python run_cli.py list
 ```
 
-### 9.4 Recuperar o Arquivo Distribuído via Validação de Quórum (GET)
-Efetue a descarga descentralizada dos blocos diretamente dos nós de armazenamento, remontando o arquivo de forma limpa em disco:
+### 9.4 Recuperar o Arquivo Distribuído via Egress e Failover (GET)
+Efetue a descarga descentralizada dos blocos diretamente do nó-egress (que busca em peers o que não tiver localmente), remontando o arquivo de forma limpa em disco:
 ```bash
-python run_cli.py get /documentos/financeiro/dados.txt copia_recuperada.txt
+python run_cli.py get documentos/financeiro/dados.txt copia_recuperada.txt
 ```
 
 ### 9.5 Disparar Processamento Analítico Local por Localidade `[Não Feito]` (WORDCOUNT)
 Acione a rotina computacional do MapReduce para executar busca e contagem paralela de strings diretamente nos discos dos Workers:
 ```bash
-python run_cli.py wordcount /documentos/financeiro/dados.txt "distribuidos"
+python run_cli.py wordcount documentos/financeiro/dados.txt "distribuidos"
 ```
 
 ### 9.6 Expurgar Arquivo Físico e Limpar Discos dos Nós (RM)
-Remova logicamente o arquivo do índice e dispare ordens de destruição física de chunks em todas as partições do cluster:
+Remova logicamente o arquivo do índice e dispare ordens de destruição física de chunks (comandadas pelo coordenador, em paralelo) em todas as réplicas do cluster:
 ```bash
-python run_cli.py rm /documentos/financeiro/dados.txt
+python run_cli.py rm documentos/financeiro/dados.txt
 ```
 
 ### 9.7 Entrar no Modo Interativo Persistente de Alta Velocidade da CLI
-Invoque a interface sem passar argumentos adicionais para iniciar o loop de sessão interativa do DFS:
+Invoque a interface sem passar argumentos para iniciar o loop de sessão interativa do DFS:
 ```bash
 python run_cli.py
 ```
-*Vantagem arquitetural crucial: Este modo mantém os canais gRPC instanciados em cache na sessão ativa do terminal do usuário, eliminando completamente o overhead temporal de reabertura e fechamento de conexões e handshakes HTTP/2 a cada comando sequencial digitado.*
+*Vantagem arquitetural crucial: este modo mantém o canal gRPC com o coordenador instanciado em cache na sessão ativa do terminal, eliminando o overhead temporal de reabrir conexão e refazer o handshake HTTP/2 a cada comando sequencial digitado. Dentro da sessão, os comandos `put`, `get`, `list`, `rm` e `menu`/`help` ficam disponíveis no prompt `dfs>`.*
 
 ---
 
 ## 🔍 10. Detalhamento Técnico Profundo dos Fluxos de Operação (Traces Lógicos)
 
-Esta seção documenta o encadeamento detalhado de eventos lógicos estruturados que guiam a execução interna do sistema operacional do DFS em cada cenário operacional do ecossistema.
+Esta seção documenta o encadeamento detalhado de eventos lógicos estruturados que guiam a execução interna do sistema do DFS em cada cenário operacional.
 
-### 10.1 Rastreamento Completo do Fluxo PUT (Escrita Distribuída)
+### 10.1 Rastreamento Completo do Fluxo PUT (Escrita Distribuída via Gateway)
 
 ```text
-[Operador CLI] ---> Executa comando put teste.txt /docs/documento.txt
+[Operador CLI] ---> Executa comando put teste.txt docs/documento.txt
   |
-  +---> CLI avalia tamanho local (ex: 8MB) -> Calcula necessidade de 2 Chunks de 4MB (chunk_0, chunk_1)
+  +---> CLI le o arquivo local (ex: 8MB) e calcula tamanho total em bytes
   |
-  +---> CLI emite gRPC [RegisterWriteRequest] ---> [Coordenador (Porta 50051)]
+  +---> CLI emite gRPC [RequestUpload(path, size)] ---> [Coordenador (9100)]
           |
-          +---> Coordenador intercepta requisição e abre Lock de Concorrência para '/docs/documento.txt'
-          +---> Busca existência prévia: Não encontrado. Instancia metadados iniciais.
-          +---> Incrementa atómicamente a versão lógica mestre do arquivo para -> Version [v1]
-          +---> Ativa Motor Sharding por Hashing Determinístico:
-          |       - hash('/docs/documento.txt' + 'chunk_0') % 3 -> Determina Réplicas: Node1, Node2, Node3
-          |       - hash('/docs/documento.txt' + 'chunk_1') % 3 -> Determina Réplicas: Node2, Node3, Node1
-          +---> Grava estrutura de alocação física no arquivo mestre 'metadata_index.json'
-          +---> Libera Lock de Concorrência
+          +---> Coordenador calcula total_chunks = ceil(size / 4MB) -> 2 chunks
+          +---> Escolhe o INGRESS entre os nos vivos (round-robin entre arquivos)
+          +---> Pre-computa o placement round-robin com a membership canonica:
+          |       - chunk_0 -> [node1, node2, node3]
+          |       - chunk_1 -> [node2, node3, node4]
+          +---> Gera upload_id (UUID), registra upload pendente
           |
-[Coordenador] ---> Devolve gRPC [RegisterWriteResponse] contendo Mapa de Roteamento de Chunks ---> [CLI]
+[Coordenador] ---> Devolve [upload_id, ingress, mapa de ChunkPlacement] ---> [CLI]
   |
-  +---> CLI interpreta o Shard Map recebido e inicia loops de streaming paralelos assíncronos:
+  +---> CLI emite [SetUploadPlan(upload_id, total, chunks)] ---> [Ingress]
+  |       (ingress guarda o plano no PlanStore; sem isso, abortaria com FAILED_PRECONDITION)
   |
-  +===> TRANSMISSÃO DO CHUNK 0 (Foco nas Réplicas: Node1, Node2, Node3):
-  |       |--- CLI abre gRPC Stream [WriteChunk] direto para Node1 (Porta 50052) -> Transmite bytes + v1. Node1 grava e confirma OK.
-  |       |--- CLI abre gRPC Stream [WriteChunk] direto para Node2 (Porta 50053) -> Transmite bytes + v1. Node2 grava e confirma OK.
-  |       |--- CLI abre gRPC Stream [WriteChunk] direto para Node3 (Porta 50054) -> Transmite bytes + v1. Node3 falha (TIMEOUT!).
-  |       +---> CLI avalia Quórum do Chunk 0: Recebeu 2 confirmações estáveis de escrita. Quórum W=2 ATINDIGO com sucesso!
+  +===> CLI abre stream [UploadFile] -> Ingress, enviando bytes em pedacos de 64KB (STREAM_SIZE)
+  |       |
+  |       +---> Ingress reagrupa os bytes em chunks oficiais de 4MB (CHUNK_SIZE)
+  |       |
+  |       +===> FECHAMENTO DO CHUNK 0 (replicas: node1, node2, node3):
+  |       |       - Ingress grava local se for replica deste chunk
+  |       |       - Fan-out paralelo [StoreChunk] -> node1, node2, node3 (uma thread/canal por destino)
+  |       |       - node3 falha (TIMEOUT). node1 e node2 confirmam OK.
+  |       |       - QUORUM W=2: 2 confirmacoes -> chunk 0 consolidado.
+  |       |
+  |       +===> FECHAMENTO DO CHUNK 1 (replicas: node2, node3, node4):
+  |       |       - Fan-out paralelo [StoreChunk] -> node2, node3, node4
+  |       |       - todas confirmam OK. QUORUM W=2 atingido.
   |
-  +===> TRANSMISSÃO DO CHUNK 1 (Foco nas Réplicas: Node2, Node3, Node1):
-  |       |--- CLI abre gRPC Stream [WriteChunk] direto para Node2 (Porta 50053) -> Transmite bytes + v1. Node2 grava e confirma OK.
-  |       |--- CLI abre gRPC Stream [WriteChunk] direto para Node3 (Porta 50054) -> Transmite bytes + v1. Node3 falha (TIMEOUT!).
-  |       |--- CLI abre gRPC Stream [WriteChunk] direto para Node1 (Porta 50052) -> Transmite bytes + v1. Node1 grava e confirma OK.
-  |       +---> CLI avalia Quórum do Chunk 1: Recebeu 2 confirmações estáveis de escrita. Quórum W=2 ATINGIDO com sucesso!
+  +---> Ingress emite [ConfirmUpload(upload_id, chunks gravados, total)] ---> [Coordenador]
+  |       (Coordenador converte ChunkPlacement -> dict e grava no metadata_index.json)
+  |       (e SO AGORA o arquivo passa a existir para o sistema: aparece no LIST, encontravel no GET)
   |
-[CLI] ---> Imprime mensagem de sucesso em tela e homologa a escrita estável do arquivo no cluster distribuído.
+[Ingress] ---> Fecha o stream com [UploadResult(ok=true)] ---> [CLI]
+  |
+[CLI] ---> Imprime "upload concluído" e libera o plano do PlanStore.
 ```
 
 ---
 
-### 10.2 Rastreamento Completo do Fluxo GET (Leitura com Resolução de Conflitos e Anti-Entropia)
+### 10.2 Rastreamento Completo do Fluxo GET (Leitura com Egress por Localidade e Failover Sequencial)
 
 ```text
-[Operador CLI] ---> Executa comando get /docs/documento.txt copia.txt
+[Operador CLI] ---> Executa comando get docs/documento.txt copia.txt
   |
-  +---> CLI emite chamado gRPC [GetMetadataRequest] ---> [Coordenador (Porta 50051)]
+  +---> CLI emite [RequestDownload(logical_path)] ---> [Coordenador (9100)]
           |
-          +---> Coordenador executa busca síncrona no índice JSON em disco
-          +---> Localiza arquivo. Captura a versão mestre registrada: Version [v2]
-          +---> Coordenador extrai o mapa físico de nós de réplicas associados aos chunks
+          +---> Coordenador busca no metadata_index.json (NAO recalcula placement)
+          +---> Le o tamanho total e o mapa de chunks/replicas persistido
+          +---> Escolhe o EGRESS por LOCALIDADE: no vivo com mais chunks do arquivo
+          +---> Gera download_id (UUID)
           |
-[Coordenador] ---> Devolve gRPC [GetMetadataResponse] contendo Versão Mestre v2 e Mapa de Chunks ---> [CLI]
+[Coordenador] ---> Devolve [download_id, egress, total, mapa de chunks] ---> [CLI]
   |
-  +---> CLI inicia loop sequencial de reconstrução do arquivo a partir dos dados periféricos:
+  +---> CLI emite [SetDownloadPlan(download_id, total, chunks)] ---> [Egress]
+  |       (egress guarda o plano no PlanStore)
   |
-  +===> COLETA E RESOLUÇÃO DO CHUNK 0:
-          |--- CLI dispara chamado gRPC [ReadChunk] direto para Node1 (Porta 50052)
-          |--- CLI dispara chamado gRPC [ReadChunk] direto para Node2 (Porta 50053)
-          |
-          |<--- Node1 responde com sucesso, entregando payload binário carimbado com Versão [v2]
-          |<--- Node2 responde com sucesso, entregando payload binário carimbado com Versão [v1] (STALE DATA!)
-          |
-          +===> MECANISMO DE ANTI-ENTROPIA DA CLI EM AÇÃO:
-          |      - Compara versão do Node1 (v2) com Versão Mestre Esperada (v2) -> LEGÍTIMO.
-          |      - Compara versão do Node2 (v1) com Versão Mestre Esperada (v2) -> DEFASADO/STALE!
-          |      - CLI descarta sumariamente os bytes oriundos do Node2 para evitar leituras desatualizadas.
-          |      - Quórum de leitura do Chunk 0 no momento possui apenas 1 resposta válida. Necessita R=2.
-          |
-          |--- CLI ativa Fallback em runtime e dispara gRPC [ReadChunk] de resgate para o Node3 (Porta 50054)
-          |<--- Node3 responde com sucesso, entregando payload binário carimbado com Versão [v2]
-          |
-          +===> CLI reavalia Quórum do Chunk 0: Possui agora 2 blocos validados na versão legítima v2. Quórum R=2 ATINGIDO!
+  +===> CLI abre stream [DownloadFile(download_id)] -> Egress
+  |       |
+  |       +---> Para cada chunk, em ordem de indice:
+  |       |       - Egress tem o chunk localmente? -> le do disco
+  |       |       - Nao tem? -> FetchChunk em um peer (failover sequencial pela lista de replicas)
+  |       |           * se o peer nao tem / nao responde -> tenta o proximo da lista
+  |       |           * disponivel enquanto AO MENOS UMA replica do chunk estiver viva
+  |       |       - Emite os bytes do chunk em pedacos de 64KB (STREAM_SIZE), em ordem
   |
-  +---> CLI concatena os bytes purificados do Chunk 0 e Chunk 1 livres de anomalias temporais.
+  +---> CLI concatena os DownloadChunk recebidos e grava em copia.txt
   |
-[CLI] ---> Grava o fluxo binário consolidado em 'copia.txt' no disco rígido do usuário final de forma transparente.
+[CLI] ---> "Arquivo baixado (N bytes) -> salvo em copia.txt" (round-trip byte a byte identico).
 ```
 
 ---
 
-### 10.3 Rastreamento Completo do Fluxo RM (Exclusão Síncrona e Descentralizada)
+### 10.3 Rastreamento Completo do Fluxo RM (Exclusão Comandada e Descentralizada)
 
 ```text
-[Operador CLI] ---> Executa comando rm /docs/documento.txt
+[Operador CLI] ---> Executa comando rm docs/documento.txt
   |
-  +---> CLI emite chamada gRPC [DeleteRequest] ---> [Coordenador (Porta 50051)]
+  +---> CLI emite [DeleteFile(logical_path)] ---> [Coordenador (9100)]
           |
-          +---> Coordenador intercepta chamada e captura Lock de Escrita
-          +---> Remove de forma imediata e definitiva a chave '/docs/documento.txt' do dicionário de metadados
-          +---> Força gravação síncrona de atualização atômica no arquivo JSON 'metadata_index.json'
-          +---> A partir deste milésimo de segundo, o arquivo está logicamente morto no cluster (Linearidade)
-          +---> Coordenador ativa seu componente 'Node Client Interno':
+          +---> Coordenador le os metadados do arquivo (mapa chunk -> replicas)
+          +---> Inverte o mapa para "no -> seus chunks"
+          +---> Dispara a delecao em PARALELO (uma thread por no, um canal por no):
           |       |
-          |       |--- Envia gRPC privado [PurgeFile] para Node1 -> Apaga fisicamente os chunks e limpa pastas locais vazias.
-          |       |--- Envia gRPC privado [PurgeFile] para Node2 -> Apaga fisicamente os chunks e limpa pastas locais vazias.
-          |       |--- Envia gRPC privado [PurgeFile] para Node3 -> Apaga fisicamente os chunks e limpa pastas locais vazias.
-          +---> Libera Lock de Escrita
+          |       |--- [DeleteChunk em lote] -> node1 -> apaga seus chunks, devolve (ok, falhas)
+          |       |--- [DeleteChunk em lote] -> node2 -> apaga seus chunks
+          |       |--- [DeleteChunk em lote] -> node3 -> NO MORTO: chunks contam como falha (best-effort)
+          |       |--- [DeleteChunk em lote] -> node4 -> apaga seus chunks
           |
-[Coordenador] ---> Devolve gRPC [DeleteResponse] confirmando sucesso da invalidação lógica global ---> [CLI]
+          +---> Remove a entrada do metadata_index.json (chunks primeiro, metadados depois)
+          |       (orfaos em nos mortos serao limpos no Marco 4 via chunks_to_delete)
+          |
+[Coordenador] ---> Devolve [Ack(ok, "N replicas apagadas, M falhas (best-effort)")] ---> [CLI]
   |
-[CLI] ---> Imprime mensagem de confirmação de exclusão do arquivo e liberação de espaço físico no cluster.
+[CLI] ---> Imprime a mensagem de confirmacao da exclusao logica global.
 ```
 
 ---
@@ -588,32 +620,23 @@ Esta seção documenta o encadeamento detalhado de eventos lógicos estruturados
 ### 10.4 Rastreamento Completo do Fluxo WORDCOUNT (Computação MapReduce Paralela) `[Não Feito]`
 
 ```text
-[Operador CLI] ---> Executa comando wordcount /docs/documento.txt "concorrência"
+[Operador CLI] ---> Executa comando wordcount docs/documento.txt "concorrência"
   |
-  +---> CLI emite requisição gRPC [LaunchMapReduceRequest] ---> [Coordenador (Porta 50051)]
+  +---> CLI emite requisição gRPC [LaunchMapReduceRequest] ---> [Coordenador (9100)]
           |
-          +---> Coordenador (Master) intercepta requisição analítica
-          +---> Interroga 'metadata_service' para capturar mapa físico de localidade do arquivo '/docs/documento.txt'
-          +---> Descobre a distribuição física real dos blocos lógicos nos discos dos servidores
-          +---> Ativa o 'MapReduce Service' e inicia o paralelismo de despacho focado em LOCALIDADE DE DADOS:
-          |       |
-          |       |--- Envia gRPC privado [RunMapTask] para Node1 -> Passa ID do Chunk 0 e o termo "concorrência".
-          |       |--- Envia gRPC privado [RunMapTask] para Node2 -> Passa ID do Chunk 1 e o termo "concorrência".
+          +---> Coordenador (Master) interroga os metadados para mapear a localidade dos chunks
+          +---> Ativa o MapReduce Service e despacha, por LOCALIDADE DE DADOS:
+          |       |--- [RunMapTask] -> node detentor do chunk_0 (termo "concorrência")
+          |       |--- [RunMapTask] -> node detentor do chunk_1 (termo "concorrência")
           |
-          +===> EXECUÇÃO CONCORRENTE DA FASE MAP (Nos Servidores Workers de Armazenamento):
-          |       | [Node1 Local Storage] -> Abre chunk local em disco, lê bytes em RAM, conta string -> Encontra 12 termos.
-          |       | [Node2 Local Storage] -> Abre chunk local em disco, lê bytes em RAM, conta string -> Encontra 18 termos.
-          |       |
-          |       |<--- Node1 devolve para o Coordenador resposta leve contendo o Inteiro: 12 (Overhead de Rede Zero!)
-          |       |<--- Node2 devolve para o Coordenador resposta leve contendo o Inteiro: 18 (Overhead de Rede Zero!)
+          +===> FASE MAP (nos Workers): cada no abre seus chunks locais, conta o termo em RAM,
+          |       devolve apenas um inteiro leve (overhead de rede zero para os dados).
           |
-          +===> FASE REDUCE MESTRE (No Plano de Controle do Coordenador):
-          |       - Coordenador intercepta as respostas numéricas escalares leves vindas da malha de nós.
-          |       - Executa a função de redução aritmética agregadora: Soma(12 + 18) -> Resultado Consolidado = 30.
+          +===> FASE REDUCE (no Coordenador): soma as parciais -> total consolidado.
           |
-[Coordenador] ---> Retorna gRPC [LaunchMapReduceResponse] contendo a soma consolidada 30 ---> [CLI]
+[Coordenador] ---> Retorna [LaunchMapReduceResponse(total)] ---> [CLI]
   |
-[CLI] ---> Renderiza no terminal do usuário o resultado métrico final da computação distribuída paralela.
+[CLI] ---> Renderiza o resultado métrico final da computação distribuída paralela.
 ```
 
 ---
@@ -622,55 +645,72 @@ Esta seção documenta o encadeamento detalhado de eventos lógicos estruturados
 
 A engenharia de software aplicada no design do DFS no Marco 3 foi norteada por decisões arquiteturais rígidas de alinhamento com os teoremas clássicos de computação distribuída, especificamente o **Teorema CAP (Consistency, Availability, Partition Tolerance)** de Eric Brewer.
 
-- **Escolha Inegociável pelo Quadrante CP (Consistency and Partition Tolerance):** O design de arquitetura adotado no sistema prioriza de forma absoluta a Consistência Forte (C) e a Tolerância a Partições de Rede (P). Em sistemas distribuídos reais que operam sob redes não confiáveis, a ocorrência de partições de rede (onde nós ficam isolados ou mensagens caem) é uma inevitabilidade estatística. Diante de uma divisão de rede, o ecossistema do DFS prefere sacrificar a Disponibilidade total (A) de nós degradados a expor informações corrompidas ou obsoletas. Se o cluster sofrer falhas que inviabilizem o atingimento matemático dos limites de quóruns mínimos ($W=2$ ou $R=2$), o sistema prefere bloquear de forma segura as operações de escrita ou leitura dos usuários a permitir a escrita de dados divergentes (*split-brain*) ou leituras sujas.
-- **Remoção Absoluta de Gargalos por Descentralização de I/O:** Ao abdicar do modelo clássico centralizado de proxying de arquivos (onde os arquivos passam obrigatoriamente pelas mãos de um servidor mestre antes de irem para os discos finais), o DFS mitigou o problema histórico de saturação de links de rede da controladora central. O Coordenador gerencia estritamente o Plano de Controle do sistema de arquivos, viabilizando que o Plano de Dados flua de forma limpa na periferia do ecossistema distribuído, escalando horizontalmente o throughput de rede do cluster de forma ilimitada conforme novas instâncias de armazenamento são acopladas.
-- **Otimização Drástica de Banda por Meio de Localidade de Dados (`Data Locality`):** A arquitetura conceitual da engine de MapReduce integrada ao ecossistema combate o desperdício de infraestrutura física de rede. Em vez de trafegar arquivos de múltiplos gigabytes através de links de rede saturados para processá-los centralizadamente na máquina cliente ou no nó mestre, o sistema envia instruções lógicas leves contendo funções computacionais em direção às CPUs dos servidores remotos onde as frações de dados residem fisicamente em disco rígido. Os nós processam a informação localmente e devolvem apenas vetores numéricos escalares leves, poupando a malha de rede do cluster.
+- **Escolha pelo Quadrante CP (Consistency and Partition Tolerance):** O design prioriza a Consistência da escrita e a Tolerância a Partições de Rede. Diante de uma falha que inviabilize o **quórum de escrita $W=2$** de um chunk, o sistema prefere **falhar a operação de forma segura** a gravar um chunk com replicação insuficiente, evitando estados divergentes. A leitura, por sua vez, prioriza disponibilidade dentro do que os dados persistidos permitem, via failover sequencial entre réplicas — enquanto ao menos uma réplica de cada chunk estiver viva, o GET é servido. *(O fechamento pleno da consistência forte linearizável, com quórum de leitura $R=2$, versionamento e anti-entropia satisfazendo $W+R>N$, é a evolução planejada — ver seções 5.2, 5.4 e 14.)*
+- **Remoção Absoluta de Gargalos por Descentralização de I/O:** Ao abdicar do modelo clássico centralizado de proxying de arquivos (onde os bytes passariam obrigatoriamente pelo coordenador), o DFS adota o **modelo gateway**: os bytes fluem da CLI para um nó (ingress/egress) e entre nós, diretamente. O Coordenador gerencia estritamente o plano de controle, viabilizando que o plano de dados flua na periferia do ecossistema e que a vazão agregada do cluster cresça com a adição de nós (cada novo nó adiciona banda de I/O). É o mesmo princípio do NameNode/DataNodes do HDFS.
+- **Elasticidade sem Movimentação de Dados (Placement no Write, Persistido):** Como o placement é decidido uma única vez no upload e gravado nos metadados, a entrada de um nó novo na membership canônica é uma operação O(1) no coordenador, com **zero movimentação de dados existentes**. Uploads futuros já incluem o nó novo; uploads antigos permanecem onde estão, pois seus metadados não mudam. Recalcular posicionamento a cada mudança de membership exigiria mover dados em massa — exatamente o que o modelo "decide no write, metadados são a verdade" evita.
+- **Otimização de Banda por Localidade de Dados:** Na leitura, o egress é escolhido como o nó vivo que já guarda o maior número de chunks do arquivo, minimizando as buscas em peers (`FetchChunk`) e o tráfego inter-nós. A engine de MapReduce orientada a localidade `[Não Feito]` levaria esse princípio adiante, enviando a computação aos dados em vez de trafegar os dados até a computação.
 
 ---
 
 ## 🧪 12. Critérios Técnicos Atendidos no Marco 3
 
 - Implementação completa e funcional de rede distribuída nativa rodando sobre canais multiplexados gRPC e transporte estável HTTP/2.
-- Definição estrita, tipada e agnóstica de contratos de interface baseada em especificações formais do Protocol Buffers (IDL).
-- Descentralização real de tráfego pesado com isolamento arquitetural absoluto entre Control Plane e Data Plane.
-- Mecanismo funcional estável de Replicação Ativa de Dados síncrona/concorrente adotando Fator de Replicação fixo $N=3$.
-- Garantia de Consistência Forte e linearidade de dados em tempo real implementada sob Modelo de Quórum Estrito ($W=2, R=2$).
-- Controle de Versionamento Global e Atômico carimbado de forma imutável junto à persistência física dos chunks binários nos discos dos nós.
-- Cliente espesso interativo estável operando com cache persistente de canais gRPC quentes para mitigação de latência de handshakes TCP.
-- Algoritmo matemático de Sharding determinístico e homogêneo baseado em espalhamento por Hashing de caminhos e IDs de chunks lógicos.
-- Rotinas autônomas de limpeza física de storage local nos nós com remoção recursiva automática de diretórios vazios residuais.
+- Definição estrita, tipada e agnóstica de contratos de interface baseada em Protocol Buffers (IDL), em **dois** contratos: `dfs.proto` (compartilhado, três serviços) e `dataplane.proto` (interno, handoff do plano).
+- Descentralização real de tráfego pesado com isolamento arquitetural absoluto entre Control Plane e Data Plane (**modelo gateway**: o coordenador nunca toca em bytes).
+- Mecanismo funcional de **Replicação Ativa** síncrona/concorrente (fan-out paralelo) com fator de replicação fixo $R=3$ sobre $N=5$ nós.
+- **Quórum de Escrita Estável $W=2$** implementado e validado no fan-out do PUT.
+- **Leitura por failover sequencial** entre réplicas, garantindo disponibilidade enquanto ao menos uma réplica de cada chunk estiver viva (quórum de leitura $R=2$ com versionamento/anti-entropia: planejado para o Marco 4).
+- **Placement round-robin determinístico** por índice de chunk (substituindo o sharding por hash), calculado uma vez no write e persistido (viabilizando elasticidade sem movimentação de dados).
+- **Supervisão de nós por heartbeat** com classificação ALIVE / SUSPECT / DEAD (limiares 2/4/8 s) e block report, usada para roteamento de ingress/egress.
+- **Handoff do plano de chunks** (`SetUploadPlan`/`SetDownloadPlan`) via contrato interno, mantendo o contrato compartilhado intocado.
+- **Deleção comandada pelo coordenador**, em paralelo (uma thread por nó), best-effort, com ordem segura (chunks antes, metadados depois).
+- Cliente interativo estável operando com **cache persistente do canal gRPC** do coordenador para mitigação de latência de handshakes.
+- Rotinas de limpeza física de storage local nos nós com remoção recursiva de diretórios vazios residuais.
+- **Integração ponta a ponta validada:** `put`/`get`/`list`/`rm` com verificação byte a byte do round-trip, contra coordenador real e cinco nós reais.
 
 ---
 
 ## ⚠️ 13. Matriz de Tratamento de Falhas, Exceções e Resolução de Erros Críticos
 
-- **Esquecimento de Recompilação do Arquivo Protobuf:** Caso o engenheiro altere a assinatura das mensagens ou adicione um método RPC no arquivo `dfs.proto` e esqueça de invocar o comando de geração automatizada `grpc_tools.protoc`, as novas propriedades não serão instanciadas nos pacotes Python internos. O interpretador disparará exceções fatais de atributo (`AttributeError: module 'dfs_pb2' has no attribute...`). **Resolução:** Recompile imediatamente o contrato IDL invocando a linha de comando contida no Step 4 do guia operacional.
-- **Exceções Críticas de Tamanho de Payload (`RESOURCE_EXHAUSTED`):** Se o operador tentar efetuar o upload de um chunk substancialmente volumoso e a CLI reportar erro fatal de esgotamento de recursos do gRPC, significa que as diretivas de sintonia fina foram omitidas na inicialização de algum canal ou servidor do cluster. **Resolução:** Certifique-se de que a variável global `GRPC_OPTIONS` contida em `dfs/config.py` está sendo importada e injetada de forma adequada tanto no inicializador do servidor do Coordenador quanto na criação dos canais de stubs dos clientes.
-- **Falha de Inicialização por Portas Sockets Ocupadas (`Address already in use`):** Processos fantasmas ou zumbis remanescentes de simulações e execuções passadas do DFS podem reter indevidamente a posse dos sockets de rede lógicos utilizados pelo cluster (portas 50051 a 50054). Caso ocorra erro de vinculação de endereço (*bind error*) na subida do sistema, limpe a pilha de subprocessos zumbis do seu sistema operacional utilizando comandos de kill industrial no terminal (ex: `pkill -f python` ou limpando a árvore de tarefas pelo gerenciador do Windows).
-- **Inabilidade Crítica de Atingir Quórum Mínimo de Operações:** Se dois ou mais nós de armazenamento do cluster caírem ou ficarem permanentemente offline devido a falhas catastróficas, as requisições lógicas de escrita (`put`) ou leitura (`get`) da CLI falharão de forma segura. A interface reportará falha crítica de impossibilidade de atingimento de quórum estável. Esse comportamento é a comprovação prática de que a segurança do quadrante CP do Teorema CAP está operando com sucesso absoluto, blindando o sistema contra corrupção e inconsistência de dados.
+- **Esquecimento de Recompilação do Protobuf:** Caso se altere a assinatura de mensagens ou se adicione uma RPC em `dfs.proto`/`dataplane.proto` e se esqueça de regenerar os stubs, o interpretador disparará exceções de atributo (`AttributeError: module 'dfs_pb2' has no attribute...`). **Resolução:** recompile **os dois** `.proto` com o comando do Step 4, sempre com `-I=.` a partir de `DFS_M3/`.
+- **Imports Quebrados nos Stubs (`ModuleNotFoundError: No module named 'dfs_pb2'`):** Sintoma clássico de ter compilado com `-I=dfs/pb` em vez de `-I=.`. O `protoc` gerou um import plano (`import dfs_pb2`) que não resolve em runtime. **Resolução:** recompile com `-I=.` a partir de `DFS_M3/`, conforme o Step 4, para gerar `from dfs.pb import dfs_pb2`.
+- **Falta do Handoff do Plano (`FAILED_PRECONDITION: sem plano para upload_id/download_id`):** O nó-gateway recebeu o stream sem ter recebido antes o `SetUploadPlan`/`SetDownloadPlan`. **Resolução:** use a CLI oficial (`run_cli.py`), que faz as três chamadas na ordem correta; scripts manuais que pulam o handoff sempre falharão aqui.
+- **Lixo de Metadados de Modelo Antigo no `list` (ex.: arquivo de poucos MB aparecendo com dezenas de chunks):** Sinal de `metadata_index.json` e/ou `data/nodes/` remanescentes de um placement antigo (hash/Marco 2) misturados ao novo. **Resolução:** pare o cluster e limpe `DFS_M3/data/metadata/*` e `DFS_M3/data/nodes/*` antes de testar (ver Step 5).
+- **Desencontro de Parâmetro no `ConfirmUpload`/`put_file`:** Se o `ConfirmUpload` chamar `put_file` com um nome de argumento que a assinatura não declara (ex.: `total_size_bytes`), o coordenador estoura `unexpected keyword argument`. **Resolução:** alinhe o nome do parâmetro entre quem chama (`ConfirmUpload`) e a definição (`put_file`); o data plane até grava os chunks antes de o erro aparecer, então o problema é exclusivamente do contrato interno do coordenador.
+- **Falha de Inicialização por Portas Ocupadas (`Address already in use`):** Processos zumbis de execuções passadas podem reter os sockets do cluster (portas 9100 a 9105). Caso ocorra erro de *bind* na subida, finalize os subprocessos remanescentes do seu sistema operacional (ex.: `pkill -f python`, ou pelo gerenciador de tarefas no Windows).
+- **Aviso de Heartbeat na Subida (`RegisterNode falhou (coordenador no ar?)`):** Como os nós sobem **antes** do coordenador no `run_cluster.py`, os primeiros batimentos podem falhar até o coordenador iniciar. **Resolução:** nenhuma — é esperado e inofensivo; o retry do heartbeat coloca os nós como ALIVE no ciclo seguinte.
+- **Inabilidade de Atingir o Quórum de Escrita:** Se réplicas demais caírem durante um PUT, a escrita de um chunk pode não atingir $W=2$ e a operação falha de forma segura, em vez de gravar de modo inconsistente — comprovação prática da prioridade de consistência (quadrante CP) na escrita.
 
 ---
 
 ## 📌 14. Próximos Passos e Desafios de Engenharia de Sistemas Distribuídos
 
-A consolidação do Marco 3 pavimenta o caminho e assenta as bases tecnológicas definitivas para as seguintes expansões de nível industrial em marcos subsequentes do projeto:
+A consolidação do Marco 3 pavimenta o caminho e assenta as bases tecnológicas definitivas para as seguintes expansões em marcos subsequentes do projeto:
 
-- **Implementação de Detector de Falhas Descentralizado por Heartbeats Dinâmicos:** Criação de rotinas em background que disparam mensagens de pulso síncronas periódicas entre o Coordenador e os Workers para rastrear e catalogar a vitalidade dos nós em tempo real.
-- **Mecanismos Autônomos de Auto-Recuperação (Self-Healing via Re-replicação de Chunks):** Desenvolvimento de algoritmos que, ao detectarem a morte definitiva de um nó de armazenamento, recalculam os shards perdidos e comandam os nós sobreviventes a duplicarem os blocos remanescentes entre si, restabelecendo o fator de replicação mestre $N=3$ sem intervenção humana.
-- **Protocolos de Consenso Estruturados para Alta Disponibilidade do Coordenador (ex: Raft):** Eliminação do Coordenador como ponto único de falha lógica (*Single Point of Failure*) através da instanciação de um anel coordenado de masters operando sob o algoritmo de consenso Raft para eleição de líder e replicação de metadados.
-- **Algoritmos Assíncronos de Rebalanceamento Automático de Carga de Disco:** Mecanismos que analisam a volumetria de ocupação de armazenamento físico de cada nó e movem blocos de dados de storages sobrecarregados para servidores ociosos, mantendo a homogeneidade do cluster de forma dinâmica.
+- **Re-replicação Automática (Self-Healing):** ao detectar a morte definitiva de um nó, recalcular as réplicas faltantes e comandar os nós sobreviventes a restaurar o fator $R=3$ copiando os chunks remanescentes entre si, sem intervenção humana. O `NodeRegistry` (DEAD) e o block report do heartbeat já fornecem a base de informação.
+- **Limpeza de Chunks Órfãos (`chunks_to_delete`):** ligar a lógica, no coordenador, que detecta chunks que existem fisicamente num nó mas não estão nos metadados (ou que sobreviveram a um nó morto durante um RM) e os manda apagar no próximo heartbeat — o campo já existe no contrato.
+- **Consistência Forte de Leitura (Versionamento + Quórum $R=2$ + Anti-entropia):** carimbar versão por chunk, ler de um quórum $R=2$, comparar versões e descartar/“curar” réplicas defasadas — fechando a inequação $W+R>N$ para linearizabilidade, evoluindo o atual failover sequencial.
+- **Protocolos de Consenso para Alta Disponibilidade do Coordenador (ex.: Raft):** eliminar o Coordenador como ponto único de falha através de um anel de masters sob consenso, com eleição de líder e replicação de metadados.
+- **Rebalanceamento Automático de Carga de Disco:** analisar a ocupação física de cada nó e mover blocos de storages sobrecarregados para nós ociosos, mantendo a homogeneidade do cluster dinamicamente.
+- **MapReduce por Localidade (`wordcount`):** implementar o `mapreduce_service` e o `node_compute_service` hoje marcados como `[Não Feito]`, enviando computação aos dados.
+- **Validação Empírica de `CHUNK_SIZE` por Benchmark:** medir throughput e latência variando o tamanho do chunk, documentando os trade-offs (Marco 5).
 
 ---
 
 ## 👨‍💻 15. Observações Finais de Restrição
 
-- O ecossistema opera sob Sharding determinístico baseado em Hashing puro por Chunk, dispensando o acoplamento de bancos de dados relacionais complexos ou pesados para mapeamento físico de localização de blocos no cluster.
-- O caminho local do arquivo de origem na máquina hospedeira do usuário deve obrigatoriamente existir com permissões de leitura válidas antes de invocar comandos operacionais de injeção (`put`).
-- O caminho virtual definido para um arquivo dentro da árvore lógica do DFS pode ser completamente independente do nome original ou localização real do arquivo físico em sua máquina hospedeira, operando como uma camada abstrata pura de visualização de dados.
+- O ecossistema opera sob **placement round-robin determinístico por índice de chunk** (não mais hashing), dispensando bancos de dados relacionais para mapeamento físico de blocos; a localização teórica de qualquer chunk é calculável a partir do seu índice e da membership canônica.
+- O placement EXIGE a membership canônica (os $N=5$ nós, na ordem fixa) — passar a lista de nós vivos no lugar dela deslocaria o `% N` e tornaria chunks já gravados inacessíveis; a função de placement se blinda contra isso exigindo `cluster_size`.
+- As duas granularidades de tamanho (`CHUNK_SIZE = 4 MB` para placement/replicação e `STREAM_SIZE = 64 KB` para transporte) **nunca devem ser confundidas**; é essa separação que dispensa o `GRPC_OPTIONS`.
+- O caminho local do arquivo de origem na máquina hospedeira deve existir com permissões de leitura válidas antes de invocar o `put` (a CLI resolve caminhos relativos a partir do diretório onde é executada).
+- O caminho virtual de um arquivo dentro da árvore lógica do DFS pode ser completamente independente do nome ou da localização real do arquivo físico na máquina do usuário, operando como uma camada de abstração pura.
+- Mudanças no `dfs.proto`, no `placement.py` ou no `ARQUITETURA.md` exigem combinação prévia entre a dupla e entram na `main` via PR.
 
 ---
 
 ## 👨‍💻 16. Autores
 
-- **Higor Ferreira Silva** — Matrícula: 202201635
-- **Vitória Mendonça** — Matrícula: 202004699
+- **Higor Ferreira Silva** — Matrícula: 202201635 — Plano de Dados (DataService, ReplicationService, DataPlaneService, PlanStore, LocalStorage, CLI de dados).
+- **Vitória Mendonça** — Matrícula: 202004699 — Plano de Controle (ControlService/coordenador, NodeRegistry, placement, metadados, deleção comandada).
+
+Disciplina: Sistemas Distribuídos 1 — Prof. Vagner José Sacramento Rodrigues — Engenharia de Computação, EMC/UFG.
