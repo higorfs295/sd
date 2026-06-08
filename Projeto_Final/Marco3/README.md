@@ -553,16 +553,8 @@ O design do DFS no Marco 3 foi norteado pelo **Teorema CAP (Consistency, Availab
 
 ---
 
-## 👨‍💻 14. Observações Finais e Autores
+## 👨‍💻 14. Autores
 
-- O ecossistema opera sob **placement round-robin determinístico por índice de chunk**, dispensando bancos de dados para mapeamento físico de blocos; a localização de qualquer chunk é calculável a partir do seu índice e da membership canônica.
-- O placement EXIGE a membership canônica (os $N=5$ nós, na ordem fixa) — passar a lista de nós vivos no lugar dela deslocaria o `% N` e tornaria chunks já gravados inacessíveis; a função se blinda contra isso exigindo `cluster_size`.
-- As duas granularidades (`CHUNK_SIZE = 4 MB` para placement/replicação e `STREAM_SIZE = 64 KB` para transporte) **nunca devem ser confundidas**; é essa separação que dispensa inflar o limite de mensagem do gRPC.
-- O caminho local de origem deve existir com permissão de leitura antes do `put` (a CLI resolve caminhos relativos a partir de onde é executada).
-- O caminho virtual de um arquivo no DFS é independente do nome/local do arquivo físico na máquina do usuário, operando como uma camada de abstração.
-- Mudanças no `dfs.proto`, no `placement.py` ou na arquitetura exigem combinação prévia entre a dupla e entram na `main` via PR.
-
-### Autores
 
 - **Higor Ferreira Silva** — Matrícula: 202201635 — Plano de Dados (DataService, ReplicationService, DataPlaneService, PlanStore, LocalStorage, CLI de dados).
 - **Vitória Mendonça** — Matrícula: 202004699 — Plano de Controle (ControlService/coordenador, NodeRegistry, placement, metadados, deleção comandada).
