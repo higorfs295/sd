@@ -48,7 +48,7 @@ def start_process(
 
 def main() -> None:
     """
-    Sobe os 5 nós e o coordenador do DFS
+    Sobe o coordenador e os 5 nós do DFS
     """
     if not DFS_DIR.exists():
         print(f"Erro: pasta não encontrada: {DFS_DIR}")
@@ -58,7 +58,20 @@ def main() -> None:
     processes: list[subprocess.Popen] = []
 
     try:
-        # Loop que cobre quantos nós existirem em config.py
+        # Coordenador sobe PRIMEIRO: assim, quando os nós ligarem e chamarem RegisterNode, o coordenador já está no ar e o registro funciona de primeira.
+        processes.append(
+            start_process(
+                "coordinator",
+                [sys.executable, "-m", "dfs.interface.server"],
+                cwd=DFS_DIR,
+                env=env,
+            )
+        )
+
+        # Pausa para o coordenador terminar de subir e abrir a porta gRPC antes de qualquer nó tentar se registrar.
+        time.sleep(1.0)
+
+        # Agora sobe os nós. Loop que cobre quantos nós existirem em config.py
         # Se adicionar nodeX no NODES, eles sobem automaticamente, sem mexer aqui
         for node_id in NODE_ORDER:
             processes.append(
@@ -77,16 +90,6 @@ def main() -> None:
             )
             # Pequena pausa entre subidas para evitar disputa pela porta
             time.sleep(0.5)
-
-        # Coordenador sobe DEPOIS dos nós, assim quando ele começa a processar requisições, todos os nós já estão prontos
-        processes.append(
-            start_process(
-                "coordinator",
-                [sys.executable, "-m", "dfs.interface.server"],
-                cwd=DFS_DIR,
-                env=env,
-            )
-        )
 
         print("\nCluster DFS iniciado.")
         print("Deixe este terminal aberto enquanto usa a CLI em outro terminal.")

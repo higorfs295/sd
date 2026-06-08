@@ -376,11 +376,17 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             chunks=chunks_para_gravar,
         )
 
+        # Relê o arquivo recém-gravado só para recuperar o timestamp e exibir no log.
+        # Isso evidencia, na demonstração, que o controle de timestamp está ativo.
+        info_gravada = self.metadata.get_file(caminho_logico)
+        carimbo = info_gravada.get("uploaded_at", "—") if info_gravada else "—"
+
         # 4. Responder (o upload já saiu da fila no passo 1)
         print(
             f"[ConfirmUpload] path={caminho_logico} | "
             f"upload_id={upload_id} | "
-            f"{len(chunks_para_gravar)} chunk(s) gravado(s) nos metadados."
+            f"{len(chunks_para_gravar)} chunk(s) gravado(s) nos metadados | "
+            f"uploaded_at={carimbo}"
         )
 
         return dfs_pb2.Ack(

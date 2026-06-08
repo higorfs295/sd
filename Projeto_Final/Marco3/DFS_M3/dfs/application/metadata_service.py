@@ -1,5 +1,6 @@
 import json  # Usada para salvar e carregar o índice dos metadados
 import threading
+import datetime  # Usada para registrar a data e hora do upload dos arquivos
 from pathlib import Path
 from dfs.config import (
     METADATA_FILE,
@@ -91,6 +92,7 @@ class MetadataService:
                 # Guardamos como total_size_bytes (nome do campo do .proto).
                 "total_size_bytes": total_size_bytes,
                 "chunks": chunks,
+                "uploaded_at": datetime.datetime.now().isoformat(),  # timestamp
                 "distribution": {
                     "chunk_count": len(chunks),
                     "nodes_used": nodes_used,
