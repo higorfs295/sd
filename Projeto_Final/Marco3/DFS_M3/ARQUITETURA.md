@@ -49,7 +49,7 @@ Processo Python no terminal do usuário. Lê arquivos do disco local e os envia 
 
 ### Coordenador
 Processo Python único. Hospeda o `ControlService`. Mantém:
-- o **catálogo de metadados** (quais arquivos existem, em quantos chunks, e em quais nós está cada réplica), persistido em JSON;
+- o **catálogo de metadados** (quais arquivos existem, em quantos chunks, timestamps e em quais nós está cada réplica), persistido em JSON;
 - o **registro de nós** (membership canônica estática + estado vivo dinâmico via heartbeat).
 
 Decide o posicionamento dos chunks, designa qual nó atua como ingress/egress por operação, e comanda a deleção física. Nunca toca nos bytes dos arquivos.
