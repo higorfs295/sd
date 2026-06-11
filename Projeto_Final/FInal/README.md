@@ -279,9 +279,9 @@ Por padrão de fábrica, o framework gRPC limita o tamanho de transmissão de me
 Abaixo encontra-se a árvore de diretórios oficial do ecossistema do DFS no Marco 3, **já no estado integrado**, detalhando minuciosamente a função lógica de cada componente. Note que os artefatos legados do Marco 2 (`sharding.py`, `node_service.py`, `node_client.py`, `file_service.py`) foram **aposentados** na integração e substituídos pela organização por papel técnico abaixo:
 
 ```text
-MARCO3/
+Final/
 ├── .venv/                               # Ambiente virtual isolado Python 3 contendo interpretador e libs.
-├── DFS_M3/                              # Diretório mestre que encapsula o código-fonte do pacote DFS.
+├── DFS/                              # Diretório mestre que encapsula o código-fonte do pacote DFS.
 │   ├── pyproject.toml                   # Especificação de metadados, build-system e empacotamento moderno.
 │   ├── requirements.txt                 # Dependências (protobuf e grpcio-tools).
 │   │
@@ -353,12 +353,12 @@ MARCO3/
 
 Esta seção provê uma autópsia técnica detalhada sobre a responsabilidade funcional interna de cada arquivo que compõe o ecossistema de software do DFS no Marco 3, já no estado integrado.
 
-### 7.1 Arquivos do Diretório Raiz `MARCO3/`
+### 7.1 Arquivos do Diretório Raiz `Final/`
 
 - **`run_cluster.py`:** Atua como o maestro de processos da infraestrutura local. Utilizando o módulo `subprocess` do Python, ele inicializa de forma concorrente e isolada os processos do cluster: as **cinco** instâncias de Nós de Armazenamento (portas 9101 a 9105) e, **em seguida**, a instância do Coordenador (porta 9100). Os nós sobem antes do coordenador de propósito — assim, quando o coordenador começa a processar requisições, os nós já estão prontos; os primeiros heartbeats podem falhar com um aviso inofensivo até o coordenador subir, pois o heartbeat tem retry e os nós entram como ALIVE no ciclo seguinte. O script lê `NODE_ORDER` do `config.py`, então adicionar nós no config faz o runner subi-los automaticamente, sem editar o runner.
-- **`run_cli.py`:** Funciona como o portal de entrada para o usuário final. Ele insere `DFS_M3/` no `sys.path`, importa dinamicamente o módulo `dfs.interface.cli` e delega a execução para o seu `main`, permitindo a invocação limpa dos fluxos operacionais (`put`/`get`/`list`/`rm`/`menu`) sem exigir navegação interna de pastas. Sem argumentos, abre o **modo interativo persistente**.
+- **`run_cli.py`:** Funciona como o portal de entrada para o usuário final. Ele insere `DFS/` no `sys.path`, importa dinamicamente o módulo `dfs.interface.cli` e delega a execução para o seu `main`, permitindo a invocação limpa dos fluxos operacionais (`put`/`get`/`list`/`rm`/`menu`) sem exigir navegação interna de pastas. Sem argumentos, abre o **modo interativo persistente**.
 
-### 7.2 Arquivos do Core Package `DFS_M3/dfs/`
+### 7.2 Arquivos do Core Package `DFS/dfs/`
 
 - **`config.py`:** Centraliza as variáveis que ditam o comportamento de todo o cluster: endereço e porta do Coordenador (`127.0.0.1:9100`), porta base dos nós (`9101`, com node1→9101 … node5→9105), o número de nós (`NODE_COUNT = 5`), o fator de replicação (`REPLICATION_FACTOR = 3`), as duas granularidades de tamanho (`CHUNK_SIZE = 4 MB` e `STREAM_SIZE = 64 KB`), os limiares de heartbeat (`HEARTBEAT_INTERVAL = 2s`, `HEARTBEAT_SUSPECT = 4s`, `HEARTBEAT_DEAD = 8s`) e os caminhos de dados. A configuração dos nós é gerada dinamicamente por `build_nodes(NODE_COUNT)`. **Não há `GRPC_OPTIONS`** — por design, o transporte fatiado em 64 KB torna desnecessário inflar o limite de mensagem do gRPC.
 - **`client.py`:** Implementa o `DataClient`, o cliente gRPC do nó-gateway. Encapsula os stubs do `DataService` e do `DataPlaneService` na mesma conexão e provê os métodos do plano de dados: `set_upload_plan`/`set_download_plan` (handoff), `upload` (gera o stream de `UploadChunk` em pedaços de `STREAM_SIZE`) e `download` (consome o stream de `DownloadChunk` e concatena os bytes). Reexporta o `ControlClient` para a CLI.
@@ -394,7 +394,7 @@ Esta seção provê uma autópsia técnica detalhada sobre a responsabilidade fu
 
 ## 🚀 8. Guia de Execução Operacional Detalhado
 
-Toda a preparação de ambiente virtual, instalação de dependências core, compilação de stubs e execução da infraestrutura distribuída deve ser realizada obrigatoriamente a partir do diretório raiz `MARCO3/`.
+Toda a preparação de ambiente virtual, instalação de dependências core, compilação de stubs e execução da infraestrutura distribuída deve ser realizada obrigatoriamente a partir do diretório raiz `Final/`.
 
 ### Step 1: Provisionar o Ambiente Virtual Isolado (VENV)
 Crie o ambiente virtual Python 3 para garantir o completo isolamento das bibliotecas do projeto:
@@ -424,13 +424,13 @@ Ative a `venv` de acordo com as especificidades do seu terminal de comandos e si
 ### Step 3: Instalar as Dependências Core do Ecossistema
 Com a sua `venv` devidamente ativada no terminal, execute o gerenciador de pacotes para sanar as dependências obrigatórias de rede e compilação do gRPC:
 ```bash
-pip install -r DFS_M3/requirements.txt
+pip install -r DFS/requirements.txt
 ```
 
 ### Step 4: Compilação Manual do Contrato IDL (Protobuf / gRPC)
-Sempre que um dos arquivos de especificação (`DFS_M3/dfs/pb/dfs.proto` ou `DFS_M3/dfs/pb/dataplane.proto`) sofrer qualquer modificação, mude o escopo para a raiz do pacote (`DFS_M3/`) e recompile **os dois** `.proto`. É **obrigatório** usar `-I=.` (e não `-I=dfs/pb`), pois é isso que faz o `protoc` gerar o import qualificado `from dfs.pb import dfs_pb2`; com `-I=dfs/pb` ele geraria `import dfs_pb2` (plano), que quebra em tempo de execução com `ModuleNotFoundError`:
+Sempre que um dos arquivos de especificação (`DFS/dfs/pb/dfs.proto` ou `DFS/dfs/pb/dataplane.proto`) sofrer qualquer modificação, mude o escopo para a raiz do pacote (`DFS/`) e recompile **os dois** `.proto`. É **obrigatório** usar `-I=.` (e não `-I=dfs/pb`), pois é isso que faz o `protoc` gerar o import qualificado `from dfs.pb import dfs_pb2`; com `-I=dfs/pb` ele geraria `import dfs_pb2` (plano), que quebra em tempo de execução com `ModuleNotFoundError`:
 ```bash
-cd DFS_M3
+cd DFS
 python -m grpc_tools.protoc -I=. --python_out=. --grpc_python_out=. dfs/pb/dfs.proto
 python -m grpc_tools.protoc -I=. --python_out=. --grpc_python_out=. dfs/pb/dataplane.proto
 cd ..
@@ -440,11 +440,11 @@ cd ..
 ### Step 5: Inicializar os Diretórios Físicos do Simulador de Discos
 Garanta a existência prévia da árvore de diretórios necessária para simular o isolamento físico dos storages locais dos cinco nós e da pasta de metadados mestre do Coordenador (o sistema também cria as pastas sob demanda, mas é bom garantir):
 ```bash
-mkdir -p DFS_M3/data/metadata
-mkdir -p DFS_M3/data/nodes/node1 DFS_M3/data/nodes/node2 DFS_M3/data/nodes/node3
-mkdir -p DFS_M3/data/nodes/node4 DFS_M3/data/nodes/node5
+mkdir -p DFS/data/metadata
+mkdir -p DFS/data/nodes/node1 DFS/data/nodes/node2 DFS/data/nodes/node3
+mkdir -p DFS/data/nodes/node4 DFS/data/nodes/node5
 ```
-> **Dica de higiene:** ao mudar `NODE_COUNT` ou ao migrar de uma versão antiga dos metadados, apague `DFS_M3/data/metadata/*` e `DFS_M3/data/nodes/*` antes de subir o cluster — dados gravados sob um placement diferente ficam inacessíveis e poluem o `list`.
+> **Dica de higiene:** ao mudar `NODE_COUNT` ou ao migrar de uma versão antiga dos metadados, apague `DFS/data/metadata/*` e `DFS/data/nodes/*` antes de subir o cluster — dados gravados sob um placement diferente ficam inacessíveis e poluem o `list`.
 
 ### Step 6: Lançar e Subir o Cluster gRPC Completo Online
 Para colocar toda a infraestrutura distribuída online em uma única chamada de console, invoque o script centralizador de subprocessos:
@@ -466,13 +466,13 @@ python run_cli.py <comando> [argumentos]
 ### 9.1 Preparar um Arquivo Local para Testes de Transmissão
 Gere um arquivo textual contendo dados arbitrários na raiz do projeto para servir de cobaia de I/O distribuído:
 ```bash
-echo "Sistemas distribuidos e replicados utilizando gateway e round-robin gRPC Marco 3" > DFS_M3/teste.txt
+echo "Sistemas distribuidos e replicados utilizando gateway e round-robin gRPC Marco 3" > DFS/teste.txt
 ```
 
 ### 9.2 Injetar o Arquivo Local no Ecossistema DFS (PUT)
 Envie o arquivo local para uma rota virtual parametrizada dentro da árvore lógica do sistema de arquivos distribuído:
 ```bash
-python run_cli.py put DFS_M3/teste.txt documentos/financeiro/dados.txt
+python run_cli.py put DFS/teste.txt documentos/financeiro/dados.txt
 ```
 
 ### 9.3 Auditar o Índice e Metadados Globais do Cluster (LIST)
@@ -672,10 +672,10 @@ A engenharia de software aplicada no design do DFS no Marco 3 foi norteada por d
 
 ## ⚠️ 13. Matriz de Tratamento de Falhas, Exceções e Resolução de Erros Críticos
 
-- **Esquecimento de Recompilação do Protobuf:** Caso se altere a assinatura de mensagens ou se adicione uma RPC em `dfs.proto`/`dataplane.proto` e se esqueça de regenerar os stubs, o interpretador disparará exceções de atributo (`AttributeError: module 'dfs_pb2' has no attribute...`). **Resolução:** recompile **os dois** `.proto` com o comando do Step 4, sempre com `-I=.` a partir de `DFS_M3/`.
-- **Imports Quebrados nos Stubs (`ModuleNotFoundError: No module named 'dfs_pb2'`):** Sintoma clássico de ter compilado com `-I=dfs/pb` em vez de `-I=.`. O `protoc` gerou um import plano (`import dfs_pb2`) que não resolve em runtime. **Resolução:** recompile com `-I=.` a partir de `DFS_M3/`, conforme o Step 4, para gerar `from dfs.pb import dfs_pb2`.
+- **Esquecimento de Recompilação do Protobuf:** Caso se altere a assinatura de mensagens ou se adicione uma RPC em `dfs.proto`/`dataplane.proto` e se esqueça de regenerar os stubs, o interpretador disparará exceções de atributo (`AttributeError: module 'dfs_pb2' has no attribute...`). **Resolução:** recompile **os dois** `.proto` com o comando do Step 4, sempre com `-I=.` a partir de `DFS/`.
+- **Imports Quebrados nos Stubs (`ModuleNotFoundError: No module named 'dfs_pb2'`):** Sintoma clássico de ter compilado com `-I=dfs/pb` em vez de `-I=.`. O `protoc` gerou um import plano (`import dfs_pb2`) que não resolve em runtime. **Resolução:** recompile com `-I=.` a partir de `DFS/`, conforme o Step 4, para gerar `from dfs.pb import dfs_pb2`.
 - **Falta do Handoff do Plano (`FAILED_PRECONDITION: sem plano para upload_id/download_id`):** O nó-gateway recebeu o stream sem ter recebido antes o `SetUploadPlan`/`SetDownloadPlan`. **Resolução:** use a CLI oficial (`run_cli.py`), que faz as três chamadas na ordem correta; scripts manuais que pulam o handoff sempre falharão aqui.
-- **Lixo de Metadados de Modelo Antigo no `list` (ex.: arquivo de poucos MB aparecendo com dezenas de chunks):** Sinal de `metadata_index.json` e/ou `data/nodes/` remanescentes de um placement antigo (hash/Marco 2) misturados ao novo. **Resolução:** pare o cluster e limpe `DFS_M3/data/metadata/*` e `DFS_M3/data/nodes/*` antes de testar (ver Step 5).
+- **Lixo de Metadados de Modelo Antigo no `list` (ex.: arquivo de poucos MB aparecendo com dezenas de chunks):** Sinal de `metadata_index.json` e/ou `data/nodes/` remanescentes de um placement antigo (hash/Marco 2) misturados ao novo. **Resolução:** pare o cluster e limpe `DFS/data/metadata/*` e `DFS/data/nodes/*` antes de testar (ver Step 5).
 - **Desencontro de Parâmetro no `ConfirmUpload`/`put_file`:** Se o `ConfirmUpload` chamar `put_file` com um nome de argumento que a assinatura não declara (ex.: `total_size_bytes`), o coordenador estoura `unexpected keyword argument`. **Resolução:** alinhe o nome do parâmetro entre quem chama (`ConfirmUpload`) e a definição (`put_file`); o data plane até grava os chunks antes de o erro aparecer, então o problema é exclusivamente do contrato interno do coordenador.
 - **Falha de Inicialização por Portas Ocupadas (`Address already in use`):** Processos zumbis de execuções passadas podem reter os sockets do cluster (portas 9100 a 9105). Caso ocorra erro de *bind* na subida, finalize os subprocessos remanescentes do seu sistema operacional (ex.: `pkill -f python`, ou pelo gerenciador de tarefas no Windows).
 - **Aviso de Heartbeat na Subida (`RegisterNode falhou (coordenador no ar?)`):** Como os nós sobem **antes** do coordenador no `run_cluster.py`, os primeiros batimentos podem falhar até o coordenador iniciar. **Resolução:** nenhuma — é esperado e inofensivo; o retry do heartbeat coloca os nós como ALIVE no ciclo seguinte.
