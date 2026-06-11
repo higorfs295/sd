@@ -26,6 +26,7 @@ from dfs.config import (
 from dfs.pb import dfs_pb2, dfs_pb2_grpc
 from dfs.cluster import placement
 from dfs.cluster import replication_client
+from dfs.cluster.replication_watcher import ReplicationWatcher
 
 # ====================================================================== #
 # CONTROLSERVICE: Plano de controle do coordenador
@@ -621,8 +622,15 @@ def main():
     # atendendo vários clientes em paralelo.
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=50))
 
+    # Instâncias COMPARTILHADAS: o servicer e o watcher precisam ver o mesmo registry (estado vivo dos nós) e o mesmo metadata (mapa de chunks).
+    # Sem compartilhar, o watcher veria um índice/registro diferentes.
+    metadata = MetadataService()
+    registry = NodeRegistry()
+
+    servicer = ControlServiceServicer(metadata=metadata, registry=registry)
+
     # Registra o ControlService no servidor.
-    dfs_pb2_grpc.add_ControlServiceServicer_to_server(ControlServiceServicer(), server)
+    dfs_pb2_grpc.add_ControlServiceServicer_to_server(servicer, server)
 
     address = f"{COORDINATOR_HOST}:{COORDINATOR_PORT}"
     server.add_insecure_port(address)

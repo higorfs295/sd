@@ -104,3 +104,8 @@ HEARTBEAT_DEAD = 8
 
 # Quantidade de réplicas de cada chunk.
 REPLICATION_FACTOR = 3
+
+# Intervalo da varredura ativa de re-replicação.
+# A thread do ReplicationWatcher acorda a cada WATCHER_INTERVAL segundos para detectar transições para DEAD.
+# Escolhido igual ao HEARTBEAT_INTERVAL: a latência total de detecção de uma morte é, no pior caso, HEARTBEAT_DEAD + WATCHER_INTERVAL (≈ 10 s)
+WATCHER_INTERVAL = 2
