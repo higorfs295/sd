@@ -48,11 +48,10 @@ from dfs.config import (
 from dfs.pb import dfs_pb2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True)  # impede alterações acidentais após a criação
 class NodeInfo:
     """
     Identidade ESTÁTICA de um nó (vem do config; não muda).
-    frozen=True impede alterações acidentais após a criação.
     """
 
     node_id: str
@@ -65,9 +64,7 @@ class NodeInfo:
 class NodeRuntime:
     """
     Estado DINÂMICO de um nó, atualizado a cada registro/heartbeat.
-
-    Ao contrário do NodeInfo (identidade fixa, frozen), aqui os campos mudam o
-    tempo todo conforme os batimentos chegam, por isso este NÃO é frozen.
+    Ao contrário do NodeInfo (identidade fixa, frozen), aqui os campos mudam o tempo todo conforme os batimentos chegam.
     """
 
     node_id: str
@@ -91,9 +88,7 @@ class NodeRegistry:
     def __init__(self, nodes: dict[str, dict] | None = None):
         """
         Inicializa o registro de nós.
-
-        Se nenhum conjunto de nós for passado manualmente,
-        utiliza a configuração global definida em config.py.
+        Se nenhum conjunto de nós for passado manualmente, utiliza a configuração global definida em config.py.
         """
 
         raw_nodes = nodes or NODES
@@ -128,9 +123,7 @@ class NodeRegistry:
         # Sem ele, duas escritas concorrentes poderiam se corromper.
         self._lock = threading.Lock()
 
-    # ================================================================== #
     # PARTE ESTÁTICA (usada pelo placement)
-    # ================================================================== #
 
     def canonical_members(self) -> list[NodeInfo]:
         """Todos os nós conhecidos pelo cluster, na ordem fixa. É o que o placement consome."""
@@ -161,9 +154,7 @@ class NodeRegistry:
         """Quantidade de nós registrados."""
         return len(self._ordered_ids)
 
-    # ================================================================== #
     # PARTE DINÂMICA: registro, heartbeat e detecção de falha
-    # ================================================================== #
 
     def register_node(
         self, node_id: str, host: str, port: int, free_space_bytes: int
@@ -229,12 +220,29 @@ class NodeRegistry:
         - canonical_members(): placement (inclui nós SUSPECT e DEAD, porque o placement é estático e não pode mudar a cada heartbeat)
         - alive_members(): ingress/egress (só quem está vivo agora)
 
-        Classifica todos os nós dentro de um único bloco com lock, para evitar que o estado mude entre classificações
+        Classifica todos os nós dentro de um único bloco com lock, para evitar que o estado mude entre classificações.
         """
         with self._lock:
             return [
                 self._nodes[node_id]
                 for node_id in self._ordered_ids
+                # _status_locked: versão sem lock, chamada dentro do lock já ativo.
+                # Chamar status_of aqui causaria deadlock.
+                if self._status_locked(node_id) == dfs_pb2.NODE_STATUS_ALIVE
+            ]
+
+    # Difere de alive_members(), que devolve NodeInfo (id, host, porta), aqui devolve NodeRuntime (free_space_bytes, uploads ativos, etc.).
+    def alive_runtimes(self) -> list[NodeRuntime]:
+        """
+        Retorna o estado vivo (NodeRuntime) dos nós que estão com status ALIVE agora.
+        É o que a re-replicação consome para escolher o destino de uma cópia (o nó vivo com mais espaço livre).
+
+        Classifica todos os nós dentro de um único bloco com lock, para evitar que o estado mude entre classificações.
+        """
+        with self._lock:
+            return [
+                runtime
+                for node_id, runtime in self._runtime.items()
                 # _status_locked: versão sem lock, chamada dentro do lock já ativo.
                 # Chamar status_of aqui causaria deadlock.
                 if self._status_locked(node_id) == dfs_pb2.NODE_STATUS_ALIVE

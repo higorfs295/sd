@@ -164,21 +164,39 @@ class ReplicationWatcher:
                     {
                         "chunk_id": chunk["chunk_id"],
                         "alive_rep": alive_rep,
-                        # Destino da cópia: definido no DIA 13/06. Por ora, None.
-                        # alive_rep == [] sinaliza chunk SEM fonte viva: o
-                        # consumer não tem de onde copiar agora, é um
-                        # chunk temporariamente indisponível, tratado à parte.
-                        "destiny": self._select_destiny(
-                            chunk, alive_rep, actual_status
-                        ),
+                        # Destino da cópia: nó vivo com maior espaço livre que ainda não guarda este chunk (ou None se não houver).
+                        # alive_rep == [] sinaliza chunk sem fonte viva: o consumer não tem de onde copiar agora, é um chunk temporariamente indisponível, tratado à parte.
+                        "destiny": self._select_destiny(chunk),
                     }
                 )
         return lost
 
-    def _select_destiny(self, chunk, alive_rep, actual_status):
+    def _select_destiny(self, chunk):
         """
-        STUB (dia 13). Critério futuro: nó vivo com maior free_space_bytes que
-        ainda NÃO guarda este chunk (free_space_bytes já vem no heartbeat).
-        Por enquanto devolve None, para manter ESTE passo focado só na detecção.
+        Escolhe o destino da cópia de re-replicação.
+        Critérios de escolha do destino:
+        1. candidatos = nós vivos que não são réplicas atuais deste chunk (duas cópias no mesmo nó não aumentam a tolerância a falhas);
+        2. entre os candidatos, escolhe o de maior espaço livre (balanceia a ocupação do cluster, evitando lotar um nó só).
+
+        Retorna o node_id escolhido, ou None se não houver candidato (nenhum nó vivo livre para receber a cópia agora, chunk fica aguardando destino).
         """
-        return None
+        # Réplicas registradas nos metadados, não só as vivas, pois um nó réplica que está SUSPECT ainda tem o chunk, então não deve ser escolhido como destino de uma cópia nova.
+        current_replicas = set(chunk.get("replicas", []))
+
+        # Candidatos: nós vivos que ainda não são réplicas deste chunk.
+        # alive_runtimes() já devolve só os ALIVE, com o free_space_bytes.
+        candidates = [
+            rt
+            for rt in self.registry.alive_runtimes()
+            if rt.node_id not in current_replicas
+        ]
+
+        if not candidates:
+            # Nenhum nó vivo livre para receber a cópia agora.
+            # None aqui significa "sem destino", distinto de alive_rep == [] ("sem fonte"). O consumer trata os dois casos à parte.
+            return None
+
+        # Maior espaço livre vence. max com key: percorre os candidatos e
+        # devolve aquele cujo free_space_bytes é o maior.
+        melhor = max(candidates, key=lambda rt: rt.free_space_bytes)
+        return melhor.node_id
