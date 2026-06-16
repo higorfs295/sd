@@ -1,4 +1,5 @@
 # Distributed File System (DFS) — Marco 3
+
 ## Manual de Arquitetura, Engenharia de Sistemas Distribuídos e Documentação Técnica Operacional
 
 ---
@@ -237,6 +238,7 @@ Para governar a consistência de dados sem depender de protocolos pesados e cent
 $$W + R > N_{replicas}$$
 
 Onde, no contexto de cada chunk:
+
 - $N_{replicas}$ representa o número de réplicas de um chunk ($=R=3$).
 - $W$ representa o Quórum Mínimo de Escrita Estável ($W=2$, **implementado**).
 - $R$ representa o Quórum Mínimo de Leitura Consistente ($R=2$, **planejado para o Marco 4**).
@@ -252,6 +254,7 @@ Para eliminar a necessidade de manter tabelas de roteamento pesadas e centraliza
 $$\text{réplicas}(chunk_i) = [\, N[(i+0) \bmod N],\ N[(i+1) \bmod N],\ \dots,\ N[(i+R-1) \bmod N]\,]$$
 
 A primeira réplica é o *primary*. Com $N=5$ e $R=3$: o chunk 0 vai para $[node1, node2, node3]$, o chunk 1 para $[node2, node3, node4]$, e assim por diante, com a janela deslizando circularmente. Isso assegura:
+
 - **Determinismo:** qualquer componente calcula a localização teórica de um bloco apenas a partir do seu índice, sem consultar tabelas.
 - **Uniformidade exata:** ao contrário do hash (que garante uniformidade apenas estatística), o round-robin produz espalhamento uniforme exato e uma sequência previsível, fácil de auditar na defesa.
 
@@ -397,64 +400,88 @@ Esta seção provê uma autópsia técnica detalhada sobre a responsabilidade fu
 Toda a preparação de ambiente virtual, instalação de dependências core, compilação de stubs e execução da infraestrutura distribuída deve ser realizada obrigatoriamente a partir do diretório raiz `Final/`.
 
 ### Step 1: Provisionar o Ambiente Virtual Isolado (VENV)
+
 Crie o ambiente virtual Python 3 para garantir o completo isolamento das bibliotecas do projeto:
+
 ```bash
 python -m venv .venv
 ```
 
 ### Step 2: Ativar o Ambiente Virtual baseando-se no Sistema Operacional
+
 Ative a `venv` de acordo com as especificidades do seu terminal de comandos e sistema operacional:
+
 - **Linux / macOS (Bash/Zsh):**
+
   ```bash
   source .venv/bin/activate
   ```
+
 - **Windows (PowerShell):**
+
   ```bash
   .venv\Scripts\Activate.ps1
   ```
+
 - **Windows (Prompt de Comando CMD clássico):**
+
   ```bash
   .venv\Scripts\activate.bat
   ```
+
 - **Windows rodando VS Code com terminal Git Bash:**
+
   ```bash
   source .venv/Scripts/activate
   ```
 
 ### Step 3: Instalar as Dependências Core do Ecossistema
+
 Com a sua `venv` devidamente ativada no terminal, execute o gerenciador de pacotes para sanar as dependências obrigatórias de rede e compilação do gRPC:
+
 ```bash
 pip install -r DFS/requirements.txt
 ```
 
 ### Step 4: Compilação Manual do Contrato IDL (Protobuf / gRPC)
+
 Sempre que um dos arquivos de especificação (`DFS/dfs/pb/dfs.proto` ou `DFS/dfs/pb/dataplane.proto`) sofrer qualquer modificação, mude o escopo para a raiz do pacote (`DFS/`) e recompile **os dois** `.proto`. É **obrigatório** usar `-I=.` (e não `-I=dfs/pb`), pois é isso que faz o `protoc` gerar o import qualificado `from dfs.pb import dfs_pb2`; com `-I=dfs/pb` ele geraria `import dfs_pb2` (plano), que quebra em tempo de execução com `ModuleNotFoundError`:
+
 ```bash
 cd DFS
 python -m grpc_tools.protoc -I=. --python_out=. --grpc_python_out=. dfs/pb/dfs.proto
 python -m grpc_tools.protoc -I=. --python_out=. --grpc_python_out=. dfs/pb/dataplane.proto
 cd ..
 ```
+
 *(O `dataplane_pb2` reusa `dfs.v1.ChunkPlacement` e `dfs.v1.Ack` via `from dfs.pb import dfs_pb2`; por isso a ordem e o `-I=.` importam. Nunca edite os arquivos `*_pb2*.py` à mão.)*
 
 ### Step 5: Inicializar os Diretórios Físicos do Simulador de Discos
+
 Garanta a existência prévia da árvore de diretórios necessária para simular o isolamento físico dos storages locais dos cinco nós e da pasta de metadados mestre do Coordenador (o sistema também cria as pastas sob demanda, mas é bom garantir):
+
 ```bash
 mkdir -p DFS/data/metadata
 mkdir -p DFS/data/nodes/node1 DFS/data/nodes/node2 DFS/data/nodes/node3
 mkdir -p DFS/data/nodes/node4 DFS/data/nodes/node5
 ```
+
 > **Dica de higiene:** ao mudar `NODE_COUNT` ou ao migrar de uma versão antiga dos metadados, apague `DFS/data/metadata/*` e `DFS/data/nodes/*` antes de subir o cluster — dados gravados sob um placement diferente ficam inacessíveis e poluem o `list`.
 
 ### Step 6: Lançar e Subir o Cluster gRPC Completo Online
+
 Para colocar toda a infraestrutura distribuída online em uma única chamada de console, invoque o script centralizador de subprocessos:
+
 ```bash
 python run_cluster.py
 ```
+
 *Atenção: este terminal passará a cuspir logs concorrentes unificados gerados simultaneamente pelo Coordenador e pelos 5 nós de armazenamento ativos. Mantenha esta janela aberta e intocada durante toda a sua simulação de testes. É normal ver um aviso inicial de heartbeat falhando até o coordenador subir (os nós sobem antes); o retry resolve no ciclo seguinte.*
 
 ### Step 7: Interagir com o DFS via Interface CLI
+
 Abra uma janela de terminal completamente independente, garanta a ativação prévia da sua `venv` e execute comandos operacionais utilizando o lançador unificado do Data Plane:
+
 ```bash
 python run_cli.py <comando> [argumentos]
 ```
@@ -464,46 +491,61 @@ python run_cli.py <comando> [argumentos]
 ## 🧪 9. Exemplos de Uso Prático e Simulações de Cenários
 
 ### 9.1 Preparar um Arquivo Local para Testes de Transmissão
+
 Gere um arquivo textual contendo dados arbitrários na raiz do projeto para servir de cobaia de I/O distribuído:
+
 ```bash
 echo "Sistemas distribuidos e replicados utilizando gateway e round-robin gRPC Marco 3" > DFS/teste.txt
 ```
 
 ### 9.2 Injetar o Arquivo Local no Ecossistema DFS (PUT)
+
 Envie o arquivo local para uma rota virtual parametrizada dentro da árvore lógica do sistema de arquivos distribuído:
+
 ```bash
 python run_cli.py put DFS/teste.txt documentos/financeiro/dados.txt
 ```
 
 ### 9.3 Auditar o Índice e Metadados Globais do Cluster (LIST)
+
 Consulte o estado de registro lógico atualizado para checar a existência, tamanho consolidado, número de chunks e nós que guardam o arquivo injetado:
+
 ```bash
 python run_cli.py list
 ```
 
 ### 9.4 Recuperar o Arquivo Distribuído via Egress e Failover (GET)
+
 Efetue a descarga descentralizada dos blocos diretamente do nó-egress (que busca em peers o que não tiver localmente), remontando o arquivo de forma limpa em disco:
+
 ```bash
 python run_cli.py get documentos/financeiro/dados.txt copia_recuperada.txt
 ```
 
 ### 9.5 Disparar Processamento Analítico Local por Localidade `[Não Feito]` (WORDCOUNT)
+
 Acione a rotina computacional do MapReduce para executar busca e contagem paralela de strings diretamente nos discos dos Workers:
+
 ```bash
 python run_cli.py wordcount documentos/financeiro/dados.txt "distribuidos"
 ```
 
 ### 9.6 Expurgar Arquivo Físico e Limpar Discos dos Nós (RM)
+
 Remova logicamente o arquivo do índice e dispare ordens de destruição física de chunks (comandadas pelo coordenador, em paralelo) em todas as réplicas do cluster:
+
 ```bash
 python run_cli.py rm documentos/financeiro/dados.txt
 ```
 
 ### 9.7 Entrar no Modo Interativo Persistente de Alta Velocidade da CLI
+
 Invoque a interface sem passar argumentos para iniciar o loop de sessão interativa do DFS:
+
 ```bash
 python run_cli.py
 ```
+
 *Vantagem arquitetural crucial: este modo mantém o canal gRPC com o coordenador instanciado em cache na sessão ativa do terminal, eliminando o overhead temporal de reabrir conexão e refazer o handshake HTTP/2 a cada comando sequencial digitado. Dentro da sessão, os comandos `put`, `get`, `list`, `rm` e `menu`/`help` ficam disponíveis no prompt `dfs>`.*
 
 ---
