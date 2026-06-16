@@ -1,0 +1,113 @@
+# dfs/interface/kafka_listener.py
+from __future__ import annotations
+
+import json
+import threading
+import grpc
+import os
+from kafka import KafkaConsumer
+
+from dfs.cluster.node_registry import NodeRegistry
+from dfs.storage.local_storage import LocalStorage
+from dfs.pb import dfs_pb2, dfs_pb2_grpc
+
+class DataPlaneCommandListener:
+    def __init__(self, node_id: str, storage: LocalStorage, broker_url: str = None):
+        self.node_id = node_id
+        self.storage = storage
+        self.registry = NodeRegistry()
+        self.topic = f'storage-node-{node_id}-commands'
+        
+        self.broker_url = broker_url or os.getenv("KAFKA_BROKER_URL", "127.0.0.1:9092")
+        
+        # Sistema de retries (tenta 5 vezes antes de falhar)
+        import time
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                self.consumer = KafkaConsumer(
+                    self.topic,
+                    bootstrap_servers=[self.broker_url],
+                    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                    auto_offset_reset='latest'
+                )
+                break  # Conectou com sucesso, sai do loop!
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"[{self.node_id}] Kafka ainda não pronto. Tentando de novo em 3s...")
+                    time.sleep(3)
+                else:
+                    raise e  # Falhou todas as vezes, levanta o erro
+
+    def start(self) -> None:
+        """Inicia a escuta do Kafka em uma thread em background."""
+        print(f"[{self.node_id}] [Kafka] Escutando comandos em '{self.topic}' (Broker: {self.broker_url})...")
+        thread = threading.Thread(target=self._listen_loop, daemon=True)
+        thread.start()
+
+    def _listen_loop(self) -> None:
+        for message in self.consumer:
+            try:
+                command = message.value
+                action = command.get('action')
+                
+                if action == 'REPLICATE_CHUNK':
+                    self._handle_replicate(command)
+                elif action == 'DRAIN_NODE':
+                    self._handle_decommission(command)
+                else:
+                    print(f"[{self.node_id}] [Kafka] Comando desconhecido: {action}")
+            except Exception as e:
+                print(f"[{self.node_id}] [Kafka] Erro no processamento da mensagem: {e}")
+
+    def _transfer_chunk(self, chunk_id: str, target_node_id: str) -> bool:
+        """COMPONENTE CENTRALIZADO: Lida com a transferência gRPC de um chunk."""
+        try:
+            # 1. Valida se o chunk existe localmente
+            if chunk_id not in self.storage.list_chunk_ids():
+                print(f"[{self.node_id}] [Kafka] Chunk '{chunk_id}' não encontrado localmente.")
+                return False
+
+            # --- SIMULAÇÃO DE ATRASO DE REDE ---
+            import os
+            import time
+            delay = float(os.getenv("NETWORK_DELAY", "0.0"))
+            if delay > 0:
+                print(f"[{self.node_id}] [Simulação] Atraso de rede: dormindo {delay}s...")
+                time.sleep(delay)
+            # -----------------------------------
+            data = self.storage.read_chunk(chunk_id)
+            target_node = self.registry.get(target_node_id)
+            target_address = f"{target_node.host}:{target_node.port}"
+            
+            # 2. Transfere via gRPC
+            with grpc.insecure_channel(target_address) as channel:
+                stub = dfs_pb2_grpc.ReplicationServiceStub(channel)
+                stub.StoreChunk(dfs_pb2.StoreChunkRequest(chunk_id=chunk_id, data=data))
+            
+            return True
+        except Exception as e:
+            print(f"[{self.node_id}] [Kafka] Erro na transferência via gRPC do chunk '{chunk_id}': {e}")
+            return False
+
+    def _handle_replicate(self, command: dict) -> None:
+        """Marco 4: Re-replicação Reativa."""
+        chunk_id, target_node_id = command.get('chunk_id'), command.get('target_node_id')
+        if not chunk_id or not target_node_id: return
+            
+        print(f"[{self.node_id}] [Kafka] Replicando '{chunk_id}' -> '{target_node_id}'...")
+        if self._transfer_chunk(chunk_id, target_node_id):
+            print(f"[{self.node_id}] [Kafka] Replicação de '{chunk_id}' concluída.")
+
+    def _handle_decommission(self, command: dict) -> None:
+        """Marco 5: Remoção dinâmica de nó."""
+        migration_plan = command.get('migration_plan', {})
+        print(f"[{self.node_id}] [Kafka] Drenando {len(migration_plan)} chunks...")
+        
+        for chunk_id, target_node_id in migration_plan.items():
+            print(f"[{self.node_id}] [Kafka] Evacuando '{chunk_id}' -> '{target_node_id}'")
+            if self._transfer_chunk(chunk_id, target_node_id):
+                # Apaga apenas se a transferência for 100% bem sucedida
+                self.storage.delete_chunk(chunk_id)
+                
+        print(f"[{self.node_id}] [Kafka] Drenagem finalizada. Nó pronto para desligamento.")
