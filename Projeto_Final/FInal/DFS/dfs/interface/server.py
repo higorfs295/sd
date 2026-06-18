@@ -2,9 +2,8 @@
 DESCRIÇÃO GERAL:
 Processo do coordenador do DFS (servidor gRPC).
 
-O coordenador implementa o ControlService (plano de controle): registro de nós,
-heartbeat, autorização de upload/download, deleção e listagem. NUNCA toca em
-bytes de arquivos de usuário, pois isso é responsabilidade dos nós (DataService).
+O coordenador implementa o ControlService (plano de controle): registro de nós, heartbeat, autorização de upload/download, deleção e listagem.
+NUNCA toca em bytes de arquivos de usuário, pois isso é responsabilidade dos nós (DataService).
 """
 
 import grpc
@@ -690,6 +689,35 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
                 f"{total_ok} réplicas apagadas, {total_falhas} falhas (best-effort)."
             ),
         )
+
+    def UpdateChunkReplicas(self, request, context):
+        """
+        Chamada pelo ReplicationManager após copiar um chunk com sucesso.
+        Atualiza os metadados: remove o nó morto e registra o nó novo como réplica.
+
+        Fecha o ciclo de re-replicação: watcher detecta queda -> copia pra réplica nova -> atualiza os metadados (aqui).
+        Sem ela, os metadados ficam desatualizados após qualquer re-replicação (nó morto persiste na lista e nó novo não é registrado).
+        """
+        atualizado = self.metadata.update_chunk_replicas(
+            chunk_id=request.chunk_id,
+            added_node_id=request.added_node_id,
+            removed_node_id=request.removed_node_id,
+        )
+
+        if atualizado:
+            print(
+                f"[replication] metadados atualizados: chunk={request.chunk_id} "
+                f"adicionado={request.added_node_id} "
+                f"removido={request.removed_node_id}"
+            )
+            return dfs_pb2.Ack(ok=True, message="réplicas atualizadas.")
+
+        # Chunk não encontrado: arquivo provavelmente apagado entre a detecção da queda e a conclusão da cópia.
+        print(
+            f"[replication] chunk {request.chunk_id} não encontrado nos metadados "
+            f"(arquivo apagado durante a re-replicação)."
+        )
+        return dfs_pb2.Ack(ok=False, message="chunk não encontrado nos metadados.")
 
 
 def main():
