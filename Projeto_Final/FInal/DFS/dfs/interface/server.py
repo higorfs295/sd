@@ -310,9 +310,10 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             cluster_size=len(nos_vivos),
         )
 
-        # 3. Pré-computar os ChunkPlacements com a membership canônica
-        nos_canonicos = self.registry.canonical_members()
-        tamanho_cluster = self.registry.size()
+        # 3. Pré-computar os ChunkPlacements com a membership canônica.
+        # Lemos a lista canônica e o tamanho num único instante (mesmo lock).
+        # Necessário agora que a membership pode crescer em runtime (RegisterNode de um nó novo): se lêssemos os dois separados, um registro concorrente poderia entrar no meio e fazer len(lista) != tamanho, estourando a blindagem do placement.
+        nos_canonicos, tamanho_cluster = self.registry.canonical_snapshot()
 
         # Quantos chunks este arquivo vai gerar.
         # math.ceil garante que o último pedaço (possivelmente menor que CHUNK_SIZE) também vire um chunk

@@ -127,7 +127,21 @@ class NodeRegistry:
 
     def canonical_members(self) -> list[NodeInfo]:
         """Todos os nós conhecidos pelo cluster, na ordem fixa. É o que o placement consome."""
-        return [self._nodes[nid] for nid in self._ordered_ids]
+        # _ordered_ids agora pode crescer em runtime (RegisterNode de nó inédito, elasticidade), então ler a lista exige o lock: sem ele, uma leitura poderia pegar a lista no meio de um append concorrente.
+        with self._lock:
+            return [self._nodes[nid] for nid in self._ordered_ids]
+
+    def canonical_snapshot(self) -> tuple[list[NodeInfo], int]:
+        """
+        Devolve a membership canônica e o tamanho do cluster no mesmo instante, sob um único lock.
+
+        Por que existe: o placement valida que len(nodes) == cluster_size (a blindagem do placement.py).
+        Se o RequestUpload lesse canonical_members() e size() em duas chamadas, um RegisterNode concorrente poderia inserir um nó entre elas -> a lista teria N e o size N+1 -> o placement estouraria por divergência.
+        Lendo os dois juntos, eles concordam por construção.
+        """
+        with self._lock:
+            members = [self._nodes[nid] for nid in self._ordered_ids]
+            return members, len(members)
 
     def get(self, node_id: str) -> NodeInfo:
         """Busca um nó pelo ID. Ex.: registry.get('node1')."""
@@ -137,22 +151,22 @@ class NodeRegistry:
         """
         Retorna um nó pela posição lógica no cluster.
 
-        O uso de módulo (%) permite:
-        - rotação circular;
-        - fallback simples;
-        - round-robin determinístico.
+        O uso de módulo (%) permite rotação circular, fallback simples e round-robin determinístico.
         """
-
-        node_id = self._ordered_ids[index % len(self._ordered_ids)]
-        return self._nodes[node_id]
+        # Lock pelo mesmo motivo de canonical_members: _ordered_ids é mutável.
+        with self._lock:
+            node_id = self._ordered_ids[index % len(self._ordered_ids)]
+            return self._nodes[node_id]
 
     def index_of(self, node_id: str) -> int:
         """Índice lógico de um nó na ordem registrada."""
-        return self._ordered_ids.index(node_id)
+        with self._lock:
+            return self._ordered_ids.index(node_id)
 
     def size(self) -> int:
-        """Quantidade de nós registrados."""
-        return len(self._ordered_ids)
+        """Quantidade de nós na membership canônica (config + nós adicionados em runtime)."""
+        with self._lock:
+            return len(self._ordered_ids)
 
     # PARTE DINÂMICA: registro, heartbeat e detecção de falha
 
@@ -160,12 +174,15 @@ class NodeRegistry:
         self, node_id: str, host: str, port: int, free_space_bytes: int
     ) -> None:
         """
-        Registra (ou re-registra) um nó.
-        Chamado pela RPC RegisterNode quando um nó liga.
-        O próprio registro já é um sinal de vida, então marcamos o last_heartbeat = agora.
-        Re-registrar (ex.: nó reiniciou) sobrescreve.
+        Registra (ou re-registra) um nó. Chamado pela RPC RegisterNode quando um nó liga.
+        O próprio registro já é um sinal de vida, então marcamos last_heartbeat = agora.
+        Re-registrar (ex.: nó reiniciou) sobrescreve o estado vivo.
+
+        Elasticidade (adição dinâmica): se o nó for inédito (não veio do config nem foi adicionado antes), ele é promovido à membership canônica aqui, passando a receber chunks de uploads futuros.
+        Uploads antigos não se movem: o placement vive nos metadados e nunca é recalculado.
         """
         with self._lock:
+            # 1) Estado dinâmico (vivo): sempre sobrescreve (re-registro = nó reiniciou).
             self._runtime[node_id] = NodeRuntime(
                 node_id=node_id,
                 host=host,
@@ -173,6 +190,34 @@ class NodeRegistry:
                 free_space_bytes=free_space_bytes,
                 last_heartbeat=time.monotonic(),
             )
+            # 2) Membership canônica: só cresce se o nó for inédito (idempotente).
+            # Já estamos sob o lock, por isso chamamos a versão *_locked.
+            self._ensure_canonical_locked(node_id, host, port)
+
+    def _ensure_canonical_locked(self, node_id: str, host: str, port: int) -> None:
+        """
+        Promove um nó inédito à membership canônica (a parte estática).
+
+        Précondição: quem chama já segura self._lock (mesma convenção do _status_locked). Não pega o lock de novo, senão dá deadlock.
+
+        Idempotente: se o nó já está em _nodes (veio do config ou já foi adicionado antes), não faz nada.
+        Reinserir quebraria a regra de réplicas distintas do placement: o _ordenar_nos estoura em node_ids duplicados.
+        """
+        if node_id in self._nodes:
+            return  # já é canônico, o re-registro só atualizou o estado vivo acima.
+
+        self._nodes[node_id] = NodeInfo(
+            node_id=node_id,
+            host=host,
+            port=port,
+            storage_dir=Path(
+                ""
+            ),  # storage_dir é irrelevante para o coordenador: ele roteia por host:port e nunca lê .storage_dir (isso é problema local do nó, que conhece o próprio disco)
+        )
+
+        # Anexa no fim: preserva os índices de quem já existia (node1..node5 seguem 0..4) e casa com a ordenação interna do placement, que reordena pelo número final do id (node6 sempre cai depois de node5).
+        # Logo, arquivos antigos (N=5) ficam intactos e os novos usam N=6 de forma limpa.
+        self._ordered_ids.append(node_id)
 
     def record_heartbeat(
         self,
