@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import grpc
+import os
 from dfs.config import STREAM_SIZE
 from dfs.pb import dfs_pb2, dfs_pb2_grpc, dataplane_pb2, dataplane_pb2_grpc
-from dfs.cluster.control_client import ControlClient   # já existe em cluster/
+from dfs.cluster.control_client import ControlClient 
 
 class DataClient:
     """Cliente do nó-gateway (ingress no PUT, egress no GET)."""
@@ -45,7 +46,47 @@ class DataClient:
             buf.extend(chunk.data)
         return bytes(buf)
 
-    def close(self):
-        self.channel.close()
+    # =================================================================
+    # ADICIONE / CORRIJA OS MÉTODOS ABAIXO:
+    # =================================================================
 
-__all__ = ["ControlClient", "DataClient"]
+    def upload_file(self, local_path: str, remote_path: str):
+        """Lê um arquivo local, obtém o plano com o Coordenador, envia o plano e faz streaming."""
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(f"Arquivo local não encontrado: {local_path}")
+            
+        with open(local_path, "rb") as f:
+            data = f.read()
+
+        # 1. Solicita as credenciais e estrutura de upload ao Coordenador
+        # (ControlClient se conecta usando as portas padrão do config.py)
+        control = ControlClient()
+        res = control.request_upload(remote_path, len(data))
+
+        # 2. Conecta dinamicamente ao nó de INGRESS determinado pelo Coordenador
+        ingress_client = DataClient(res.ingress.host, res.ingress.port)
+
+        # 3. Registra o plano de alocação de chunks especificamente neste nó ingress
+        ingress_client.set_upload_plan(res.upload_id, len(data), res.chunks)
+
+        # 4. Transmite o stream de dados para o nó ingress correto
+        return ingress_client.upload(res.upload_id, data)
+
+    def download_file(self, remote_path: str, local_path: str):
+        """Solicita download ao Coordenador, conecta no nó egress e reconstrói o arquivo."""
+        # 1. Solicita a localização dos chunks ao Coordenador
+        control = ControlClient()
+        res = control.request_download(remote_path)
+
+        # 2. Conecta dinamicamente ao nó de EGRESS determinado pelo Coordenador
+        egress_client = DataClient(res.egress.host, res.egress.port)
+
+        # 3. Informa ao nó egress o plano de recuperação dos chunks
+        egress_client.set_download_plan(res.download_id, res.total_size_bytes, res.chunks)
+
+        # 4. Baixa os dados via streaming a partir do nó correto
+        data = egress_client.download(res.download_id)
+
+        # 5. Grava o arquivo reconstruído no disco local
+        with open(local_path, "wb") as f:
+            f.write(data)

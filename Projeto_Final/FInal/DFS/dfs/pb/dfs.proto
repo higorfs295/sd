@@ -135,6 +135,10 @@ service ControlService {
 
   // Lista arquivos conhecidos pelo coordenador.
   rpc ListFiles (ListFilesRequest) returns (ListFilesResponse);
+
+  // Chamada pelo ReplicationManager após copiar um chunk para um nó novo.
+  // Atualiza os metadados: remove o nó morto e registra o nó novo como réplica.
+  rpc UpdateChunkReplicas (UpdateChunkReplicasRequest) returns (Ack);
 }
 
 // ---------- Mensagens do ControlService ----------
@@ -228,6 +232,17 @@ message DeleteFileRequest {
 
 message ListFilesRequest {
   // Reservado para filtros futuros (prefixo, etc). Vazio por enquanto.
+}
+
+// Enviada pelo ReplicationManager após copiar com sucesso um chunk para um nó novo durante a re-replicação.
+// O coordenador atualiza os metadados: remove o nó morto da lista de réplicas e adiciona o nó novo.
+message UpdateChunkReplicasRequest {
+  // Chunk que foi re-replicado.
+  string chunk_id = 1;
+  // Nó que recebeu a cópia nova (o destiny escolhido pelo watcher).
+  string added_node_id = 2;
+  // Nó morto a remover da lista de réplicas (o que caiu e gerou a re-replicação).
+  string removed_node_id = 3;
 }
 
 message FileEntry {

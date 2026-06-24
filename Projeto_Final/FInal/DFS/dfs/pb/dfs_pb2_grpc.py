@@ -85,6 +85,11 @@ class ControlServiceStub(object):
                 request_serializer=dfs_dot_pb_dot_dfs__pb2.ListFilesRequest.SerializeToString,
                 response_deserializer=dfs_dot_pb_dot_dfs__pb2.ListFilesResponse.FromString,
                 _registered_method=True)
+        self.UpdateChunkReplicas = channel.unary_unary(
+                '/dfs.v1.ControlService/UpdateChunkReplicas',
+                request_serializer=dfs_dot_pb_dot_dfs__pb2.UpdateChunkReplicasRequest.SerializeToString,
+                response_deserializer=dfs_dot_pb_dot_dfs__pb2.Ack.FromString,
+                _registered_method=True)
 
 
 class ControlServiceServicer(object):
@@ -164,6 +169,14 @@ class ControlServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def UpdateChunkReplicas(self, request, context):
+        """Chamada pelo ReplicationManager após copiar um chunk para um nó novo.
+        Atualiza os metadados: remove o nó morto e registra o nó novo como réplica.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -201,6 +214,11 @@ def add_ControlServiceServicer_to_server(servicer, server):
                     servicer.ListFiles,
                     request_deserializer=dfs_dot_pb_dot_dfs__pb2.ListFilesRequest.FromString,
                     response_serializer=dfs_dot_pb_dot_dfs__pb2.ListFilesResponse.SerializeToString,
+            ),
+            'UpdateChunkReplicas': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateChunkReplicas,
+                    request_deserializer=dfs_dot_pb_dot_dfs__pb2.UpdateChunkReplicasRequest.FromString,
+                    response_serializer=dfs_dot_pb_dot_dfs__pb2.Ack.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -408,6 +426,33 @@ class ControlService(object):
             '/dfs.v1.ControlService/ListFiles',
             dfs_dot_pb_dot_dfs__pb2.ListFilesRequest.SerializeToString,
             dfs_dot_pb_dot_dfs__pb2.ListFilesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateChunkReplicas(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dfs.v1.ControlService/UpdateChunkReplicas',
+            dfs_dot_pb_dot_dfs__pb2.UpdateChunkReplicasRequest.SerializeToString,
+            dfs_dot_pb_dot_dfs__pb2.Ack.FromString,
             options,
             channel_credentials,
             insecure,

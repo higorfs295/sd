@@ -31,16 +31,39 @@ class HeartbeatWorker:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self) -> None:
+        # Garante que tens a biblioteca os importada (podes colocar no topo do ficheiro)
+        import os 
+        
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
             try:
-                self.client.heartbeat(
+                # 1. Guarda a resposta do Coordenador numa variável
+                resposta = self.client.heartbeat(
                     self.node.node_id, 
                     shutil.disk_usage(self.node.storage_dir).free,
-                    0, 0, self.storage.list_chunk_ids()
+                    0, 0, self.storage.list_chunk_ids() # Atenção: usa o método que já tens aí no teu código original
                 )
-            except Exception:
-                pass  # coordenador fora do ar: tenta no próximo ciclo
+
+                # --- 2. INÍCIO DO CÓDIGO DO MARCO 5 (GARBAGE COLLECTION) ---
+                if hasattr(resposta, 'chunks_to_delete') and resposta.chunks_to_delete:
+                    for chunk_id in resposta.chunks_to_delete:
+                        # Descobre o caminho físico do ficheiro no disco
+                        caminho_chunk = os.path.join(self.node.storage_dir, chunk_id)
+                        
+                        try:
+                            # Se o ficheiro lá estiver, elimina-o
+                            if os.path.exists(caminho_chunk):
+                                os.remove(caminho_chunk)
+                                print(f"🧹 [{self.node.node_id}] LIXO COLETADO: Chunk {chunk_id} foi apagado do disco.")
+                            else:
+                                print(f"⚠️ [{self.node.node_id}] Chunk {chunk_id} já não existe no disco.")
+                        except Exception as erro_io:
+                            print(f"🚨 [{self.node.node_id}] Erro de I/O ao apagar {chunk_id}: {erro_io}")
+                # --- FIM DO CÓDIGO ---
+
+            except Exception as e:
+                # Mantém o teu print ou log de erro que já tinhas antes
+                print(f"[{self.node.node_id}] Erro no heartbeat: {e}")
 
 class StorageNodeApp:
     """Orquestrador principal do Nó de Armazenamento (Data Plane)."""
