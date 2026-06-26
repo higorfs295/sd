@@ -124,8 +124,22 @@ class MetadataService:
             # Retorna os caminhos lógicos dos arquivos indexados, ordenados alfabeticamente
             return sorted(self._index["files"].keys())
 
-    # LISTAGEM UNIFICADA (usada pela CLI)
+    def expected_chunks_on(self, node_id: str) -> set[str]:
+        """
+        Retorna o conjunto de chunk_ids que os metadados esperam encontrar no nó dado, ou seja, todo chunk cujas réplicas registradas incluem node_id.
+        É a referência contra a qual o coordenador compara o block report do heartbeat para detectar órfãos: chunks fisicamente presentes no nó mas ausentes dos metadados.
 
+        Devolve um set para tornar a subtração de conjuntos (órfãos) direta e por elemento na comparação.
+        """
+        expected: set[str] = set()
+        with self._lock:
+            for info in self._index["files"].values():
+                for chunk in info.get("chunks", []):
+                    if node_id in chunk.get("replicas", []):
+                        expected.add(chunk["chunk_id"])
+        return expected
+
+    # LISTAGEM UNIFICADA (usada pela CLI)
     def list_entries(self) -> list[str]:
         """
         Retorna uma visão unificada dos arquivos

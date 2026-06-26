@@ -6,7 +6,7 @@ import warnings
 from dfs.pb import dataplane_pb2 as dfs_dot_pb_dot_dataplane__pb2
 from dfs.pb import dfs_pb2 as dfs_dot_pb_dot_dfs__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -26,7 +26,7 @@ if _version_not_supported:
     )
 
 
-class DataPlaneServiceStub(object):
+class DataPlaneServiceStub:
     """Serviço INTERNO do plano de dados, exposto pelos NÓS (no mesmo servidor/porta
     do DataService) e chamado pela CLI imediatamente ANTES de abrir o stream.
     """
@@ -49,7 +49,7 @@ class DataPlaneServiceStub(object):
                 _registered_method=True)
 
 
-class DataPlaneServiceServicer(object):
+class DataPlaneServiceServicer:
     """Serviço INTERNO do plano de dados, exposto pelos NÓS (no mesmo servidor/porta
     do DataService) e chamado pela CLI imediatamente ANTES de abrir o stream.
     """
@@ -89,7 +89,7 @@ def add_DataPlaneServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class DataPlaneService(object):
+class DataPlaneService:
     """Serviço INTERNO do plano de dados, exposto pelos NÓS (no mesmo servidor/porta
     do DataService) e chamado pela CLI imediatamente ANTES de abrir o stream.
     """

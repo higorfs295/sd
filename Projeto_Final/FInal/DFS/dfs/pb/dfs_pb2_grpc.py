@@ -5,7 +5,7 @@ import warnings
 
 from dfs.pb import dfs_pb2 as dfs_dot_pb_dot_dfs__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -25,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class ControlServiceStub(object):
+class ControlServiceStub:
     """=============================================================================
     CONTROLSERVICE — Plano de Controle
     =============================================================================
@@ -92,7 +92,7 @@ class ControlServiceStub(object):
                 _registered_method=True)
 
 
-class ControlServiceServicer(object):
+class ControlServiceServicer:
     """=============================================================================
     CONTROLSERVICE — Plano de Controle
     =============================================================================
@@ -228,7 +228,7 @@ def add_ControlServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class ControlService(object):
+class ControlService:
     """=============================================================================
     CONTROLSERVICE — Plano de Controle
     =============================================================================
@@ -464,7 +464,7 @@ class ControlService(object):
             _registered_method=True)
 
 
-class DataServiceStub(object):
+class DataServiceStub:
     """=============================================================================
     DATASERVICE — Plano de Dados (interface com a CLI)
     =============================================================================
@@ -495,7 +495,7 @@ class DataServiceStub(object):
                 _registered_method=True)
 
 
-class DataServiceServicer(object):
+class DataServiceServicer:
     """=============================================================================
     DATASERVICE — Plano de Dados (interface com a CLI)
     =============================================================================
@@ -545,7 +545,7 @@ def add_DataServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class DataService(object):
+class DataService:
     """=============================================================================
     DATASERVICE — Plano de Dados (interface com a CLI)
     =============================================================================
@@ -613,7 +613,7 @@ class DataService(object):
             _registered_method=True)
 
 
-class ReplicationServiceStub(object):
+class ReplicationServiceStub:
     """=============================================================================
     REPLICATIONSERVICE — Comunicação entre Nós
     =============================================================================
@@ -658,7 +658,7 @@ class ReplicationServiceStub(object):
                 _registered_method=True)
 
 
-class ReplicationServiceServicer(object):
+class ReplicationServiceServicer:
     """=============================================================================
     REPLICATIONSERVICE — Comunicação entre Nós
     =============================================================================
@@ -734,7 +734,7 @@ def add_ReplicationServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class ReplicationService(object):
+class ReplicationService:
     """=============================================================================
     REPLICATIONSERVICE — Comunicação entre Nós
     =============================================================================

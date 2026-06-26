@@ -28,11 +28,24 @@ from dfs.cluster import placement
 from dfs.cluster import replication_client
 from dfs.cluster.replication_watcher import ReplicationWatcher
 
-# ====================================================================== #
+
+def _upload_id_from_chunk_id(chunk_id: str) -> str | None:
+    """
+    Extrai o upload_id de um chunk_id no formato '<upload_id>_chunk_<índice>'.
+
+    ACOPLAMENTO DE NOMENCLATURA: depende dessa convenção de nomenclatura (definida no RequestUpload).
+    Se o formato do chunk_id mudar (ex.: passar a ser hash de conteúdo), APENAS este ponto precisa de ajuste, pois a lógica de limpeza de órfãos não conhece o formato e não muda.
+    """
+    marcador = "_chunk_"
+
+    # Devolve None se o marcador não estiver presente: formato inesperado falha de forma segura (não tentamos adivinhar um upload_id que pode estar errado).
+    if marcador not in chunk_id:
+        return None
+    # split no marcador e pega o pedaço antes dele (o upload_id).
+    return chunk_id.split(marcador)[0]
+
+
 # CONTROLSERVICE: Plano de controle do coordenador
-# ====================================================================== #
-
-
 class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
     """
     Implementa o ControlService do dfs.proto.
@@ -75,8 +88,12 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         # Registro de uploads pendentes: upload_id com metadados do upload.
         # O ConfirmUpload vai consultar aqui para validar que o upload_id existe e recuperar os dados necessários para gravar os metadados.
         # Dicionário protegido por lock próprio: o gRPC atende em múltiplas threads e dois uploads simultâneos podem chegar ao mesmo tempo.
-        self._uploads_pendentes: dict[str, dict] = {}
+        self._pending_uploads: dict[str, dict] = {}
         self._lock_uploads = threading.Lock()
+
+        # Memória da limpeza de órfãos: por nó, os chunk_ids que ficaram suspeitos de órfão no ciclo de heartbeat anterior (já após a proteção dos uploads pendentes).
+        # Base da camada temporal: só confirmamos como órfão o que esteve suspeito em dois ciclos seguidos.
+        self._suspected_orphans: dict[str, set[str]] = {}
 
     def ListFiles(self, request, context):
         """
@@ -159,24 +176,25 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
 
     def Heartbeat(self, request, context):
         """
-        Recebe o batimento periódico de um nó (a cada ~2s, conforme HEARTBEAT_INTERVAL).
+        Recebe o batimento periódico de um nó (conforme HEARTBEAT_INTERVAL).
+
+        Além de registrar o sinal de vida, calcula os chunks órfãos do nó (presentes no disco dele mas ausentes dos metadados) e os devolve em chunks_to_delete para o nó apagar.
+        Órfão = block report do nó (chunks que os metadados esperam no nó), filtrado pelas duas camadas de proteção em _detectar_orfaos.
 
         Enquanto o RegisterNode é o registro inicial de que o nó ligou (uma vez só), o Heartbeat é o status de vida (repetido o tempo todo).
-        É a AUSÊNCIA de batimentos que o coordenador usa, mais tarde, para classificar um nó como SUSPECT ou DEAD, e esse cálculo é feito sob demanda em NodeRegistry.status_of.
-        Esta RPC só GRAVA o sinal de vida; a CLASSIFICAÇÃO é uma leitura separada.
+        É a ausência de batimentos que o coordenador usa, mais tarde, para classificar um nó como SUSPECT ou DEAD, e esse cálculo é feito sob demanda em NodeRegistry.status_of.
+        Esta RPC só grava o sinal de vida. A classificação é uma leitura separada.
 
         O batimento também carrega o estado fresco do nó:
-          - free_space_bytes / active_uploads / active_downloads:
-          Reservados para escolher ingress/egress por carga (refinamento do round-robin);
-          - chunk_ids: o "block report" (inventário de chunks que o nó possui).
-          No Marco 3 apenas guardamos, no Marco 4 será utilizado para achar chunks órfãos/perdidos e re-replicar.
+        - free_space_bytes / active_uploads / active_downloads;
+        - chunk_ids: o "block report" (inventário de chunks que o nó possui).
 
-        Esta RPC é só um ADAPTADOR: tira os campos do request, delega para NodeRegistry.record_heartbeat, e empacota a resposta.
+        Esta RPC é só um adaptador: tira os campos do request, delega para NodeRegistry.record_heartbeat, e empacota a resposta.
         Toda a regra de armazenamento do estado vivo vive no registry.
         """
-        # Delega para o registry. O retorno diz se o nó é CONHECIDO:
-        # - True: batimento aceito; estado e last_heartbeat atualizados.
-        # - False: nó desconhecido (nunca registrou E não está na membership canônica do config). O nó deve chamar RegisterNode antes.
+        # Delega para o registry. O retorno diz se o nó é conhecido:
+        # - True: batimento aceito. Estado e last_heartbeat atualizados.
+        # - False: nó desconhecido (nunca registrou e não está na membership canônica do config). O nó deve chamar RegisterNode antes.
         conhecido = self.registry.record_heartbeat(
             node_id=request.node_id,
             free_space_bytes=request.free_space_bytes,
@@ -185,9 +203,67 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             chunk_ids=request.chunk_ids,  # record_heartbeat já faz a cópia com list()
         )
 
-        # chunks_to_delete fica VAZIO no Marco 3: detectar chunks órfãos (existem no disco do nó mas não nos metadados) e mandar apagá-los pertence ao marco de tolerância a falhas (Marco 4).
-        # O campo já existe no contrato, então ligá-lo depois é só lógica no coordenador, não muda a interface .proto.
-        return dfs_pb2.HeartbeatResponse(ok=conhecido, chunks_to_delete=[])
+        # Nó desconhecido: não calculamos órfãos (ele deve se registrar primeiro).
+        if not conhecido:
+            return dfs_pb2.HeartbeatResponse(ok=False, chunks_to_delete=[])
+
+        chunks_to_delete = self._detectar_orfaos(
+            node_id=request.node_id,
+            block_report=set(request.chunk_ids),
+        )
+
+        return dfs_pb2.HeartbeatResponse(ok=True, chunks_to_delete=chunks_to_delete)
+
+    def _detectar_orfaos(self, node_id: str, block_report: set[str]) -> list[str]:
+        """
+        Decide quais chunks o nó deve apagar, duas camadas de proteção.
+
+        Suspeito = chunk que o nó reporta (block_report) mas que os metadados não
+        esperam nele (expected).
+
+        Sobre cada suspeito, aplicamos:
+        - Camada 1 (determinística): Se o chunk pertence a um upload pendente, é um upload gravado no nó, mas ainda sem ConfirmUpload, então não é órfão. Elimina o falso positivo.
+        - Camada 2 (temporal): para o que sobra, só confirma como órfão se já era suspeito no ciclo de heartbeat anterior.
+            Protege os casos que a camada 1 não enxerga, sobretudo um restart do coordenador, em que _pending_uploads nasce vazio. Na dúvida, espera (erra para o lado seguro).
+        """
+        expected = self.metadata.expected_chunks_on(node_id)
+
+        # Suspeitos brutos deste ciclo: o nó tem, mas os metadados não esperam.
+        raw_suspects = block_report - expected
+
+        # Camada 1: remove os que pertencem a uploads pendentes conhecidos.
+        # Snapshot dos upload_ids pendentes sob o lock (a varredura roda concorrente com RequestUpload/ConfirmUpload, em outras threads).
+        with self._lock_uploads:
+            pending_uploads = set(self._pending_uploads.keys())
+
+        suspects = (
+            set()
+        )  # Cria um conjunto vazio para armazenar os suspeitos filtrados, ou seja, aqueles que passaram pela camada 1.
+        for chunk_id in raw_suspects:
+            upload_id = _upload_id_from_chunk_id(chunk_id)
+            # Pertence a um upload pendente? Protege (não órfão).
+            # upload_id None = formato inesperado do chunk_id; não dá para associar a um pendente, então segue para a camada 2 (conservadora).
+            if upload_id is not None and upload_id in pending_uploads:
+                continue
+            suspects.add(chunk_id)
+
+        # Camada 2: dois ciclos de heartbeat sobre o que sobrou da camada 1.
+        suspects_before = self._suspected_orphans.get(
+            node_id, set()
+        )  # Pegamos o conjunto de chunk_ids que estavam suspeitos no ciclo anterior para este nó.
+        orphans = suspects & suspects_before
+
+        # Atualiza a memória com os suspeitos de agora (pós-camada 1), para o próximo ciclo.
+        # Sobrescreve (não acumula): importa o ciclo imediatamente anterior, não o histórico inteiro.
+        self._suspected_orphans[node_id] = suspects
+
+        if orphans:
+            print(
+                f"[orphans] {node_id}: {len(orphans)} órfão(s) confirmado(s) "
+                f"para deleção: {sorted(orphans)}"
+            )
+
+        return sorted(orphans)
 
     def RequestUpload(self, request, context):
         """
@@ -227,7 +303,7 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         # O contador de arquivos é o próprio número de uploads já registrados.
         # Funciona como índice para o round-robin do ingress_for_file: cada arquivo novo rotaciona para o próximo nó da lista.
         with self._lock_uploads:
-            indice_arquivo = len(self._uploads_pendentes)
+            indice_arquivo = len(self._pending_uploads)
 
         no_ingress = placement.ingress_for_file(
             file_index=indice_arquivo,
@@ -297,7 +373,7 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
 
         # Protege o acesso ao dicionário de uploads pendentes, garantindo que uploads simultâneos não causem condições de corrida.
         with self._lock_uploads:
-            self._uploads_pendentes[upload_id] = {
+            self._pending_uploads[upload_id] = {
                 "logical_path": caminho_logico,
                 "total_size_bytes": request.total_size_bytes,
                 "ingress_node_id": no_ingress.node_id,
@@ -326,11 +402,11 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         Confirmar a partir do ingress também tira essa responsabilidade de um cliente fraco.
 
         É só AQUI que o arquivo passa a existir para o sistema: antes do ConfirmUpload, o upload era apenas PENDENTE
-        (planejado no RequestUpload, guardado em _uploads_pendentes, mas não gravados).
+        (planejado no RequestUpload, guardado em _pending_uploads, mas não gravados).
         Depois daqui, está nos metadados e um GET no caminho lógico vai encontrá-lo.
 
         Quatro passos:
-        1. Valida o upload_id contra _uploads_pendentes.
+        1. Valida o upload_id contra _pending_uploads.
         2. Converte os ChunkPlacement (protobuf) para dicionários simples.
         3. Grava nos metadados no formato via metadata_service.put_file.
         4. Remove o upload da fila de pendentes e responde Ack.
@@ -342,7 +418,7 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         # pop com default None: se o id não existe, devolve None em vez de estourar.
         # Fazer pop (em vez de só ler) garante que um ConfirmUpload repetido com o mesmo id não grave o arquivo duas vezes.
         with self._lock_uploads:
-            pendente = self._uploads_pendentes.pop(upload_id, None)
+            pendente = self._pending_uploads.pop(upload_id, None)
 
         if pendente is None:
             # upload_id desconhecido: ou nunca foi autorizado ou já foi confirmado antes.
