@@ -44,22 +44,21 @@ class HeartbeatWorker:
                     0, 0, self.storage.list_chunk_ids() # Atenção: usa o método que já tens aí no teu código original
                 )
 
-                # --- 2. INÍCIO DO CÓDIGO DO MARCO 5 (GARBAGE COLLECTION) ---
+#----------------para todos os efeitos, aqui chamamos o gc, dentro do loop do heartbeat, então é correlato ao m5.
                 if hasattr(resposta, 'chunks_to_delete') and resposta.chunks_to_delete:
                     for chunk_id in resposta.chunks_to_delete:
-                        # Descobre o caminho físico do ficheiro no disco
-                        caminho_chunk = os.path.join(self.node.storage_dir, chunk_id)
-                        
                         try:
-                            # Se o ficheiro lá estiver, elimina-o
-                            if os.path.exists(caminho_chunk):
-                                os.remove(caminho_chunk)
+                            # Delega ao LocalStorage: ele resolve o caminho correto
+                            # (<storage_dir>/chunks/<chunk_id>) pela MESMA lógica do
+                            # store_chunk, então escrita e exclusão nunca divergem.
+                            # delete_chunk retorna True se apagou, False se não achou.
+                            if self.storage.delete_chunk(chunk_id):
                                 print(f"🧹 [{self.node.node_id}] LIXO COLETADO: Chunk {chunk_id} foi apagado do disco.")
                             else:
                                 print(f"⚠️ [{self.node.node_id}] Chunk {chunk_id} já não existe no disco.")
                         except Exception as erro_io:
                             print(f"🚨 [{self.node.node_id}] Erro de I/O ao apagar {chunk_id}: {erro_io}")
-                # --- FIM DO CÓDIGO ---
+#------------- 
 
             except Exception as e:
                 # Mantém o teu print ou log de erro que já tinhas antes

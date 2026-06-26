@@ -10,12 +10,14 @@ from kafka import KafkaConsumer
 from dfs.cluster.node_registry import NodeRegistry
 from dfs.storage.local_storage import LocalStorage
 from dfs.pb import dfs_pb2, dfs_pb2_grpc
+from dfs.cluster.control_client import ControlClient
 
 class DataPlaneCommandListener:
     def __init__(self, node_id: str, storage: LocalStorage, broker_url: str = None):
         self.node_id = node_id
         self.storage = storage
         self.registry = NodeRegistry()
+        self.control_client = ControlClient()
         self.topic = f'storage-node-{node_id}-commands'
         
         self.broker_url = broker_url or os.getenv("KAFKA_BROKER_URL", "127.0.0.1:9092")
@@ -53,8 +55,6 @@ class DataPlaneCommandListener:
                 
                 if action == 'REPLICATE_CHUNK':
                     self._handle_replicate(command)
-                elif action == 'DRAIN_NODE':
-                    self._handle_decommission(command)
                 else:
                     print(f"[{self.node_id}] [Kafka] Comando desconhecido: {action}")
             except Exception as e:
@@ -91,23 +91,21 @@ class DataPlaneCommandListener:
             return False
 
     def _handle_replicate(self, command: dict) -> None:
-        """Marco 4: Re-replicação Reativa."""
-        chunk_id, target_node_id = command.get('chunk_id'), command.get('target_node_id')
-        if not chunk_id or not target_node_id: return
-            
+   
+        chunk_id = command.get('chunk_id')
+        target_node_id = command.get('target_node_id')      # DESTINO
+        removed_node_id = command.get('removed_node_id')    # nó morto (fecha o ciclo)
+        if not chunk_id or not target_node_id:
+            return
+
         print(f"[{self.node_id}] [Kafka] Replicando '{chunk_id}' -> '{target_node_id}'...")
         if self._transfer_chunk(chunk_id, target_node_id):
             print(f"[{self.node_id}] [Kafka] Replicação de '{chunk_id}' concluída.")
-
-    def _handle_decommission(self, command: dict) -> None:
-        """Marco 5: Remoção dinâmica de nó."""
-        migration_plan = command.get('migration_plan', {})
-        print(f"[{self.node_id}] [Kafka] Drenando {len(migration_plan)} chunks...")
-        
-        for chunk_id, target_node_id in migration_plan.items():
-            print(f"[{self.node_id}] [Kafka] Evacuando '{chunk_id}' -> '{target_node_id}'")
-            if self._transfer_chunk(chunk_id, target_node_id):
-                # Apaga apenas se a transferência for 100% bem sucedida
-                self.storage.delete_chunk(chunk_id)
-                
-        print(f"[{self.node_id}] [Kafka] Drenagem finalizada. Nó pronto para desligamento.")
+            # Fecha o ciclo: coordenador troca o nó morto pelo novo (idempotente).
+            if removed_node_id:
+                try:
+                    client = ControlClient()
+                    client.update_chunk_replicas(chunk_id, target_node_id, removed_node_id)
+                    client.close()
+                except Exception as e:
+                    print(f"[{self.node_id}] [Kafka] Falha ao atualizar metadados de '{chunk_id}': {e}")

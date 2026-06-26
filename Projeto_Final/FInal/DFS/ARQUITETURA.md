@@ -45,17 +45,22 @@ Essa divisão é também a divisão de trabalho da dupla: o plano de controle fo
 ## 3. Componentes
 
 ### Cliente (CLI)
+
 Processo Python no terminal do usuário. Lê arquivos do disco local e os envia ao sistema; recebe e grava. É um **cliente fraco**: não fatia em chunks, não decide posicionamento, não conhece a topologia. Por operação, ele faz duas conversas: uma com o coordenado (controle) e uma com um nó (dados). Mantém um canal persistente com o coordenador durante a sessão interativa para evitar o custo de reabrir conexão a cada comando.
 
 ### Coordenador
+
 Processo Python único. Hospeda o `ControlService`. Mantém:
+
 - o **catálogo de metadados** (quais arquivos existem, em quantos chunks, timestamps e em quais nós está cada réplica), persistido em JSON;
 - o **registro de nós** (membership canônica estática + estado vivo dinâmico via heartbeat).
 
 Decide o posicionamento dos chunks, designa qual nó atua como ingress/egress por operação, e comanda a deleção física. Nunca toca nos bytes dos arquivos.
 
 ### Nós de armazenamento
+
 Cinco processos independentes, cada um com porta e diretório próprios. Cada nó hospeda **três serviços gRPC na mesma porta**:
+
 - `DataService`: atende a CLI no PUT (como ingress) e no GET (como egress);
 - `ReplicationService`: atende outros nós (fan-out de réplicas, busca em peers) e o coordenador (deleção de chunks);
 - `DataPlaneService`: recebe da CLI o plano de chunks antes do stream (ver §6).
@@ -79,6 +84,7 @@ O contrato vive em dois arquivos `.proto`, ambos fonte de verdade:
 | **DataPlaneService** | Nós | CLI | pequeno (kB) | unário |
 
 ### RPCs do ControlService (7)
+
 - `RegisterNode`: um nó se anuncia ao subir.
 - `Heartbeat`: batimento periódico com block report (inventário de chunks).
 - `RequestUpload`: autoriza um PUT: escolhe ingress, gera `upload_id`, devolve o mapa de chunks pré-computado.
@@ -88,16 +94,19 @@ O contrato vive em dois arquivos `.proto`, ambos fonte de verdade:
 - `ListFiles`: lista os arquivos conhecidos.
 
 ### RPCs do DataService (2)
+
 - `UploadFile` (client-streaming): a CLI envia os bytes ao ingress.
 - `DownloadFile` (server-streaming): o egress devolve os bytes à CLI.
 
 ### RPCs do ReplicationService (4)
+
 - `StoreChunk` (client-streaming): o ingress envia um chunk a uma réplica.
 - `FetchChunk` (server-streaming): o egress busca um chunk num peer.
 - `DeleteChunk` (unário): o coordenador manda apagar um chunk.
 - `ListChunks` (unário): diagnóstico / validação cruzada.
 
 ### RPCs do DataPlaneService (2)
+
 - `SetUploadPlan` / `SetDownloadPlan` (unário): a CLI entrega ao nó o plano de chunks antes de abrir o stream (ver §6).
 
 ---
@@ -143,11 +152,13 @@ DFS/
 Esta seção reúne as decisões de design e o porquê de cada uma.
 
 ### 6.1 Modelo gateway: ingress no PUT, egress no GET
+
 O coordenador não toca em bytes. No PUT, a CLI envia o arquivo inteiro, em stream, para **um** nó (o *ingress*), que fatia em chunks e replica para as demais réplicas. No GET, a CLI pede o arquivo a **um** nó (o *egress*), que junta os chunks (locais + buscados em peers) e devolve em ordem.
 
 **Justificativa:** concentra o trabalho de fatiar/remontar num nó do cluster (que tem banda e está próximo dos dados), não no cliente nem no coordenador.
 
 ### 6.2 Placement: round-robin determinístico por índice de chunk
+
 As réplicas de cada chunk são dadas por uma regra pura, sem estado:
 
 ```
@@ -162,34 +173,40 @@ A primeira réplica é o *primary*. Com N=5 e R=3, o chunk 0 vai para [node1, no
 divergir (blindagem contra esse erro).
 
 ### 6.3 Placement é decidido no write e persistido (elasticidade)
+
 `replicas_for_chunk` é chamada **uma vez por chunk**, no `RequestUpload`, com a membership canônica daquele momento. O resultado vira `ChunkPlacement.replicas` nos metadados e é **imutável**. Nenhuma operação posterior (GET, DELETE) recalcula posicionamento (todas leem dos metadados).
 
 **Justificativa (elasticidade):** quando um nó novo entra (via `RegisterNode`), ele passa a integrar a membership canônica. Operação O(1) no coordenador, **zero movimentação de dados existentes**. Uploads futuros já incluem o nó novo; uploads antigos permanecem onde estão, porque seus metadados não mudam. Recalcular posicionamento a cada mudança de membership exigiria mover dados em massa (o modelo "decide no write, metadados são a verdade" evita isso).
 
 ### 6.4 Ingress por round-robin entre arquivos
+
 O ingress de cada arquivo é escolhido por `ingress_for_file`, um round-robin **entre arquivos** (um contador no coordenador rotaciona o nó a cada novo upload). O ingress é escolhido entre os nós **vivos**.
 
 **Justificativa:** distribui ao longo do tempo a carga de "ser o nó que recebe o upload" entre todos os nós, evitando que um único nó vire gargalo permanente de ingestão. É um papel de **transporte** (do arquivo inteiro), ortogonal ao papel de **réplica** (por chunk): o ingress pode não ser réplica de nenhum chunk daquele arquivo, ele só repassa os bytes. Optou-se por round-robin em vez de escolha por
 carga (`active_uploads`) porque a carga instantânea é uma métrica fraca neste cenário (ela muda durante a própria operação); o round-robin ataca o gargalo estrutural de forma principiada e é defensável no relatório.
 
 ### 6.5 Egress por localidade
+
 No GET, o egress é o nó **vivo** que guarda o maior número de chunks do arquivo. Empate é resolvido de forma determinística (menor índice).
 
 **Justificativa (localidade de dados):** o egress monta o arquivo para devolver à CLI. Quanto mais chunks ele já tem localmente, menos precisa buscar em peers (via `FetchChunk`), logo há menos tráfego entre nós e o download é mais rápido. É o mesmo princípio de localidade do MapReduce: leve a computação para perto dos dados.
 O desempate por carga (`active_downloads`) foi deixado como refinamento futuro, pela mesma razão do ingress (carga instantânea é métrica fraca).
 
 ### 6.6 Confirmação do upload parte do ingress, não da CLI
+
 Quem chama `ConfirmUpload` no coordenador é o ingress, depois de replicar, não a CLI.
 
 **Justificativa:** o ingress é quem **sabe** o que conseguiu de fato gravar e replicar. Confirmar a partir dele dá a informação correta ao coordenador e tira essa responsabilidade do cliente fraco. O arquivo só passa a existir para o sistema (aparece no LIST, é encontrável no GET) **após** o `ConfirmUpload`: antes disso o upload é apenas pendente.
 
 ### 6.7 Duas granularidades de tamanho: CHUNK_SIZE e STREAM_SIZE
+
 - `CHUNK_SIZE = 4 MB` (**chunknização**): unidade de posicionamento e replicação. Define em quantos chunks o arquivo é cortado e quantas entradas de metadado e rodadas de replicação ele gera.
 - `STREAM_SIZE = 64 KB` (o **pedaço de transporte** do stream gRPC): quanto a CLI envia por mensagem. Não é unidade de posicionamento, só de transporte.
 
 **Justificativa:** as duas têm forças opostas. O transporte quer pedaços **pequenos** (baixo uso de memória, bem abaixo do limite de mensagem do gRPC). O chunk oficial quer ser **grande** por duas razões convergentes: (1) **overhead de metadados** - com 64 KB, um arquivo de 256 MB geraria 4096 chunks; com 4 MB, apenas 64 (redução de 64×), o que responde diretamente ao feedback do Marco 2 sobre escalar o tamanho do chunk; (2) **paralelismo de distribuição** - chunks grandes demais concentrariam o arquivo em poucos nós e sabotariam o balanceamento, que é o foco do Marco 3. 4 MB equilibra as duas forças.
 
 ### 6.8 Handoff do plano de chunks (dataplane.proto)
+
 **Decisão tomada na integração.** No `dfs.proto`, o nó recebe da CLI apenas o token da operação (`upload_id` no PUT, `download_id` no GET). Mas o ingress precisa saber **em quais réplicas** gravar cada chunk, e o egress precisa saber **quais chunks** compõem o arquivo e **onde** estão. Essa informação (o `repeated ChunkPlacement`) o coordenador devolve à **CLI**, não ao nó.
 
 A solução foi um serviço interno do plano de dados, o `DataPlaneService` (`SetUploadPlan`/`SetDownloadPlan`), que a CLI chama **antes** de abrir o stream para entregar o plano ao nó. O nó guarda o plano em memória (`PlanStore`, indexado pelo id) e o consome durante o stream.
@@ -197,6 +214,7 @@ A solução foi um serviço interno do plano de dados, o `DataPlaneService` (`Se
 **Justificativa:** o handoff do plano é uma conversa interna do plano de dados (CLI ↔ nó), não do plano de controle. Mantê-lo num `.proto` separado preserva o `dfs.proto` e os stubs do coordenador intocados, então quem calcula o posicionamento continua sendo o coordenador, quem grava o índice continua sendo o `ConfirmUpload`. A CLI só **transporta** o plano. A alternativa (passar o plano na primeira mensagem do stream `UploadFile`) misturaria metadado de controle com o stream de bytes; separar é mais limpo.
 
 ### 6.9 Deleção comandada pelo coordenador, em paralelo
+
 O `DeleteFile` é conduzido pelo coordenador, não pela CLI. O coordenador lê os metadados, inverte o mapa de "chunk → réplicas" para "nó → seus chunks", e dispara a deleção em paralelo: **um nó por thread, um canal por nó**. A ordem é **chunks primeiro, metadados depois**.
 
 **Justificativa (quem comanda):** a CLI é cliente fraco e não conhece a topologia (quais chunks, em quais nós). Esse mapa vive nos metadados, que são do coordenador. Além disso, o coordenador é a **autoridade** sobre "este arquivo existe"; remover chunks e remover metadados precisam ser conduzidos pelo mesmo ator. Apagar é uma decisão de **controle** (muda o estado do sistema), por isso passa pelo coordenador, ao contrário do PUT/GET, em que os bytes vão direto.
@@ -208,12 +226,15 @@ O `DeleteFile` é conduzido pelo coordenador, não pela CLI. O coordenador lê o
 A deleção é *best-effort*: se um nó está morto, seus chunks não são apagados agora e contam como falha, mas o arquivo some dos metadados mesmo assim. Os chunks órfãos seriam limpos quando o nó voltar (mecanismo `chunks_to_delete` do heartbeat, com campo já no contrato e lógica planejada para o Marco 4).
 
 ### 6.10 Quórum de escrita W=2
+
 No fan-out do PUT, o ingress só considera um chunk gravado com sucesso se pelo menos **W=2** réplicas (contando a si próprio, se for réplica) confirmarem.
 
 **Justificativa:** com R=3 réplicas, exigir W=2 confirmações garante que a escrita sobreviva à falha de uma réplica durante o upload, sem exigir que todas as trêsestejam no ar (o que tornaria o sistema frágil a qualquer falha). É a base da inequação de quórum W + R > N para consistência forte (ver §9 sobre o estado atual da leitura).
 
 ### 6.11 Identidade vs. estado vivo no registro de nós
+
 O `NodeRegistry` separa duas responsabilidades:
+
 - **membership canônica** (estática, lida do `config.py`): a lista fixa dos N nós, sempre na mesma ordem. É o que o placement consome.
 - **estado vivo** (dinâmico): quem está ligado agora, via `register_node` e `record_heartbeat`. Classifica cada nó como ALIVE / SUSPECT / DEAD pelo tempo desde o último batimento.
 
@@ -224,6 +245,7 @@ O `NodeRegistry` separa duas responsabilidades:
 ## 7. Fluxo das operações
 
 ### PUT
+
 1. **CLI → Coordenador** `RequestUpload(logical_path, total_size)`. O coordenador escolhe o ingress (vivo, round-robin), pré-computa os `ChunkPlacement` com a membership canônica, gera `upload_id` e responde com (`upload_id`, ingress, mapa de chunks).
 2. **CLI → Ingress** `SetUploadPlan(upload_id, total, chunks)`: entrega o plano.
 3. **CLI → Ingress** `UploadFile` (stream de bytes em pedaços de `STREAM_SIZE`).
@@ -232,16 +254,19 @@ O `NodeRegistry` separa duas responsabilidades:
 6. **Ingress → CLI** `UploadResult` (fim do stream).
 
 ### GET
+
 1. **CLI → Coordenador** `RequestDownload(logical_path)`. O coordenador lê os metadados (não recalcula posicionamento), escolhe o egress por localidade, gera `download_id` e responde com (`download_id`, egress, total, mapa de chunks).
 2. **CLI → Egress** `SetDownloadPlan(download_id, total, chunks)`: entrega o plano.
 3. **CLI → Egress** `DownloadFile(download_id)` (stream de bytes).
 4. **Egress** monta o arquivo: lê os chunks que tem localmente, busca os demais em peers (`FetchChunk`), e emite o stream em ordem.
 
 ### DELETE
+
 1. **CLI → Coordenador** `DeleteFile(logical_path)`.
 2. Coordenador inverte o mapa para "nó → chunks", dispara `DeleteChunk` em paralelo (um nó por thread), remove os metadados, responde.
 
 ### LIST
+
 1. **CLI → Coordenador** `ListFiles()`. Coordenador devolve a lista dos metadados.
 
 ---
