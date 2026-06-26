@@ -2,9 +2,8 @@
 DESCRIÇÃO GERAL:
 Processo do coordenador do DFS (servidor gRPC).
 
-O coordenador implementa o ControlService (plano de controle): registro de nós,
-heartbeat, autorização de upload/download, deleção e listagem. NUNCA toca em
-bytes de arquivos de usuário, pois isso é responsabilidade dos nós (DataService).
+O coordenador implementa o ControlService (plano de controle): registro de nós, heartbeat, autorização de upload/download, deleção e listagem.
+NUNCA toca em bytes de arquivos de usuário, pois isso é responsabilidade dos nós (DataService).
 """
 
 import grpc
@@ -27,6 +26,7 @@ from dfs.pb import dfs_pb2, dfs_pb2_grpc
 from dfs.cluster import placement
 from dfs.cluster import replication_client
 from dfs.cluster.replication_watcher import ReplicationWatcher
+from dfs.cluster.rereplication_publisher import KafkaRereplicationPublisher
 
 
 def _upload_id_from_chunk_id(chunk_id: str) -> str | None:
@@ -91,6 +91,11 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         self._pending_uploads: dict[str, dict] = {}
         self._lock_uploads = threading.Lock()
 
+        # Contador monotônico de uploads para o round-robin de ingress.
+        # Só cresce, garantindo a rotação real do ingress entre arquivos ao longo do tempo.
+        # Protegido pelo mesmo _lock_uploads (mesma seção crítica dos uploads).
+        self._upload_counter = 0
+
         # Memória da limpeza de órfãos: por nó, os chunk_ids que ficaram suspeitos de órfão no ciclo de heartbeat anterior (já após a proteção dos uploads pendentes).
         # Base da camada temporal: só confirmamos como órfão o que esteve suspeito em dois ciclos seguidos.
         self._suspected_orphans: dict[str, set[str]] = {}
@@ -128,10 +133,7 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             entradas.append(
                 dfs_pb2.FileEntry(
                     logical_path=info["path"],
-                    total_size_bytes=info.get("total_size_bytes")
-                    or info.get(
-                        "size", 0
-                    ),  # compatibilidade com o formato antigo, que usava "size" em vez de "total_size_bytes" [EXCLUIR DEPOIS DO MARCO 3 SER INTEGRADO]
+                    total_size_bytes=info.get("total_size_bytes"),
                     chunk_count=distribuicao.get(
                         "chunk_count", len(info.get("chunks", []))
                     ),
@@ -300,10 +302,11 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
                 ok=False, message="Cluster sem nós vivos."
             )
 
-        # O contador de arquivos é o próprio número de uploads já registrados.
-        # Funciona como índice para o round-robin do ingress_for_file: cada arquivo novo rotaciona para o próximo nó da lista.
+        # Índice monotônico para o round-robin de ingress: lê o valor atual e incrementa sob lock (cada upload pega um índice único e crescente).
+        # É o file_index que o ingress_for_file espera. Sem isso, a rotação não acontece (ver _upload_counter no __init__).
         with self._lock_uploads:
-            indice_arquivo = len(self._pending_uploads)
+            indice_arquivo = self._upload_counter
+            self._upload_counter += 1
 
         no_ingress = placement.ingress_for_file(
             file_index=indice_arquivo,
@@ -311,9 +314,10 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             cluster_size=len(nos_vivos),
         )
 
-        # 3. Pré-computar os ChunkPlacements com a membership canônica
-        nos_canonicos = self.registry.canonical_members()
-        tamanho_cluster = self.registry.size()
+        # 3. Pré-computar os ChunkPlacements com a membership canônica.
+        # Lemos a lista canônica e o tamanho num único instante (mesmo lock).
+        # Necessário agora que a membership pode crescer em runtime (RegisterNode de um nó novo): se lêssemos os dois separados, um registro concorrente poderia entrar no meio e fazer len(lista) != tamanho, estourando a blindagem do placement.
+        nos_canonicos, tamanho_cluster = self.registry.canonical_snapshot()
 
         # Quantos chunks este arquivo vai gerar.
         # math.ceil garante que o último pedaço (possivelmente menor que CHUNK_SIZE) também vire um chunk
@@ -553,15 +557,18 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         # (NÃO recalculamos placement, só convertemos o que está salvo de volta para o formato .proto que a CLI/egress esperam.)
         placements = []
         for chunk in chunks_meta:
-            replicas_proto = [
-                # Para cada node_id salvo, buscamos o endereço atual na canônica.
-                dfs_pb2.NodeRef(
-                    node_id=node_id,
-                    host=self.registry.get(node_id).host,
-                    port=self.registry.get(node_id).port,
+            replicas_proto = []
+            for node_id in chunk["replicas"]:
+                # Resolve o endereço do nó.
+                # Pode falhar se for um nó adicionado em runtime (ex.: node6) e o coordenador tiver reiniciado desde o upload: a membership de runtime vive só em memória, some no restart, mas os metadados em disco ainda citam o nó.
+                # Nesse caso pulamos esta réplica (o egress faz failover para as demais) em vez de derrubar o GET.
+                try:
+                    no = self.registry.get(node_id)
+                except KeyError:
+                    continue
+                replicas_proto.append(
+                    dfs_pb2.NodeRef(node_id=no.node_id, host=no.host, port=no.port)
                 )
-                for node_id in chunk["replicas"]
-            ]
             placements.append(
                 dfs_pb2.ChunkPlacement(
                     chunk_id=chunk["chunk_id"],
@@ -691,6 +698,35 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             ),
         )
 
+    def UpdateChunkReplicas(self, request, context):
+        """
+        Chamada pelo ReplicationManager após copiar um chunk com sucesso.
+        Atualiza os metadados: remove o nó morto e registra o nó novo como réplica.
+
+        Fecha o ciclo de re-replicação: watcher detecta queda -> copia pra réplica nova -> atualiza os metadados (aqui).
+        Sem ela, os metadados ficam desatualizados após qualquer re-replicação (nó morto persiste na lista e nó novo não é registrado).
+        """
+        atualizado = self.metadata.update_chunk_replicas(
+            chunk_id=request.chunk_id,
+            added_node_id=request.added_node_id,
+            removed_node_id=request.removed_node_id,
+        )
+
+        if atualizado:
+            print(
+                f"[replication] metadados atualizados: chunk={request.chunk_id} "
+                f"adicionado={request.added_node_id} "
+                f"removido={request.removed_node_id}"
+            )
+            return dfs_pb2.Ack(ok=True, message="réplicas atualizadas.")
+
+        # Chunk não encontrado: arquivo provavelmente apagado entre a detecção da queda e a conclusão da cópia.
+        print(
+            f"[replication] chunk {request.chunk_id} não encontrado nos metadados "
+            f"(arquivo apagado durante a re-replicação)."
+        )
+        return dfs_pb2.Ack(ok=False, message="chunk não encontrado nos metadados.")
+
 
 def main():
     """Sobe o coordenador via gRPC expondo o ControlService."""
@@ -715,6 +751,20 @@ def main():
     print("   Serviço registrado: ControlService")
 
     server.start()
+
+    # Liga o vigia da re-replicação.
+    # Sobe depois do server.start() para varrer um coordenador já no ar.
+    # Recebe os mesmos metadata e registry do servicer (instâncias compartilhadas criadas acima), para ver o mesmo estado de nós e o mesmo mapa de chunks.
+    try:
+        publisher = KafkaRereplicationPublisher()  # conecta ao Kafka
+        watcher = ReplicationWatcher(
+            registry=registry, metadata=metadata, publisher=publisher
+        )
+    except Exception as exc:
+        print(f"[main] Kafka indisponível ({exc}). Watcher em modo isolado (console).")
+        watcher = ReplicationWatcher(registry=registry, metadata=metadata)
+    watcher.start()
+
     try:
         server.wait_for_termination()
     except KeyboardInterrupt:

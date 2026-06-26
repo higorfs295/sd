@@ -124,6 +124,33 @@ class MetadataService:
             # Retorna os caminhos lógicos dos arquivos indexados, ordenados alfabeticamente
             return sorted(self._index["files"].keys())
 
+    def update_chunk_replicas(
+        self, chunk_id: str, added_node_id: str, removed_node_id: str
+    ) -> bool:
+        """
+        Atualiza a lista de réplicas de um chunk após re-replicação bem-sucedida: remove o nó morto (removed_node_id) e adiciona o nó novo (added_node_id).
+
+        Percorre todos os arquivos até achar o chunk (chunk_id é único no índice).
+        - Retorna True se o chunk foi encontrado e atualizado;
+        - False caso contrário (chunk inexistente nos metadados, que pode ter sido apagado entre a detecção e a conclusão da cópia).
+        """
+        with self._lock:
+            for info in self._index["files"].values():
+                for chunk in info.get("chunks", []):
+                    if chunk["chunk_id"] != chunk_id:
+                        continue
+                    replicas: list[str] = chunk.get("replicas", [])
+                    # Remove o nó morto se ainda estiver na lista (pode já ter sido removido por uma atualização anterior ou nunca ter estado, se os metadados divergiram).
+                    if removed_node_id in replicas:
+                        replicas.remove(removed_node_id)
+                    # Adiciona o nó novo apenas se ainda não estiver na lista (idempotência: chamadas repetidas não duplicam a réplica).
+                    if added_node_id not in replicas:
+                        replicas.append(added_node_id)
+                    chunk["replicas"] = replicas
+                    self._save()
+                    return True
+        return False  # chunk não encontrado
+
     def expected_chunks_on(self, node_id: str) -> set[str]:
         """
         Retorna o conjunto de chunk_ids que os metadados esperam encontrar no nó dado, ou seja, todo chunk cujas réplicas registradas incluem node_id.
