@@ -26,6 +26,7 @@ from dfs.pb import dfs_pb2, dfs_pb2_grpc
 from dfs.cluster import placement
 from dfs.cluster import replication_client
 from dfs.cluster.replication_watcher import ReplicationWatcher
+from dfs.cluster.rereplication_publisher import KafkaRereplicationPublisher
 
 
 def _upload_id_from_chunk_id(chunk_id: str) -> str | None:
@@ -752,10 +753,16 @@ def main():
     server.start()
 
     # Liga o vigia da re-replicação.
-    # Recebe os mesmos metadata e registry do servicer (instâncias compartilhadas criadas acima), para ver o mesmo estado de nós e o mesmo mapa de chunks.
     # Sobe depois do server.start() para varrer um coordenador já no ar.
-    # O publisher fica no default (console_publisher, só imprime), o que permite testar a detecção isoladamente.
-    watcher = ReplicationWatcher(registry=registry, metadata=metadata)
+    # Recebe os mesmos metadata e registry do servicer (instâncias compartilhadas criadas acima), para ver o mesmo estado de nós e o mesmo mapa de chunks.
+    try:
+        publisher = KafkaRereplicationPublisher()  # conecta ao Kafka
+        watcher = ReplicationWatcher(
+            registry=registry, metadata=metadata, publisher=publisher
+        )
+    except Exception as exc:
+        print(f"[main] Kafka indisponível ({exc}). Watcher em modo isolado (console).")
+        watcher = ReplicationWatcher(registry=registry, metadata=metadata)
     watcher.start()
 
     try:
