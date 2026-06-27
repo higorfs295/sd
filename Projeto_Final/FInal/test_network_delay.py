@@ -1,6 +1,8 @@
 import os
 import subprocess
 import time
+import sys 
+
 
 # ==============================================================================
 # CONFIGURAÇÃO
@@ -12,7 +14,7 @@ import time
 # python test_network_delay.py
 
 # ==============================================================================
-CLI_UPLOAD_CMD = ["python", "-m", "dfs.interface.client", "upload", "teste_rede.txt"]
+CLI_UPLOAD_CMD = [sys.executable, "run_cli.py", "put", "teste_rede.txt", "testes/rede.bin"]
 FILE_SIZE_MB = 2
 # ==============================================================================
 

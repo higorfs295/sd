@@ -88,26 +88,56 @@ def mapa_chunk_replicas(entrada: dict) -> dict[str, list[str]]:
     return {c["chunk_id"]: list(c.get("replicas", [])) for c in entrada.get("chunks", [])}
 
 
+def _powershell_exe() -> str:
+    """
+    Caminho ABSOLUTO do powershell.exe.
+
+    Por que não chamar só 'powershell': rodando pelo Git Bash (MINGW64), o PATH
+    fica em formato POSIX (/c/Windows/System32/...), e o CreateProcess do Windows
+    não consegue achar 'powershell' pelo nome cru — daí o 'FileNotFoundError:
+    [WinError 2]'. Usar o caminho completo dispensa a busca no PATH e resolve.
+    """
+    system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or r"C:\Windows"
+    candidato = os.path.join(
+        system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+    )
+    return candidato if os.path.exists(candidato) else "powershell"
+
+
 def matar_no_windows(node_id: str) -> None:
     """
     Mata o processo do nó no Windows SEM usar wmic (deprecado no Win11 recente).
     Procura o python cujo CommandLine contém '--node-id <node_id>' e o derruba.
+
+    Se o kill automático não funcionar (powershell não encontrado, ou nenhum PID
+    casado), cai para o MODO MANUAL: você mata o nó na mão e aperta ENTER. Assim
+    o teste nunca quebra no passo do kill — no pior caso, vira semiautomático.
     """
     ps = (
         "Get-CimInstance Win32_Process | "
         f"Where-Object {{ $_.CommandLine -like '*--node-id {node_id}*' }} | "
         "ForEach-Object { Write-Output $_.ProcessId; Stop-Process -Id $_.ProcessId -Force }"
     )
-    resultado = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", ps],
-        capture_output=True, text=True,
-    )
-    pids = resultado.stdout.strip()
-    if pids:
-        print(f"      -> PID(s) derrubado(s) para {node_id}: {pids}")
-    else:
-        print(f"      ⚠️ Nenhum processo encontrado para {node_id}. "
-              f"O nó não foi morto — verifique o comando de kill. stderr={resultado.stderr.strip()}")
+
+    derrubado = False
+    try:
+        resultado = subprocess.run(
+            [_powershell_exe(), "-NoProfile", "-Command", ps],
+            capture_output=True, text=True,
+        )
+        pids = resultado.stdout.strip()
+        if pids:
+            print(f"      -> PID(s) derrubado(s) para {node_id}: {pids}")
+            derrubado = True
+        else:
+            print(f"      ⚠️ Nenhum PID casou com '--node-id {node_id}'. "
+                  f"stderr={resultado.stderr.strip()}")
+    except FileNotFoundError:
+        print("      ⚠️ Não encontrei o powershell.exe para o kill automático.")
+
+    if not derrubado:
+        input(f"      >> MODO MANUAL: mate o '{node_id}' agora (feche a janela dele "
+              f"ou use o Gerenciador de Tarefas / Stop-Process) e aperte ENTER... ")
 
 
 def main() -> None:
