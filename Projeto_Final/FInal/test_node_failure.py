@@ -1,82 +1,217 @@
+"""
+TESTE DE TOLERÂNCIA A FALHAS — re-replicação + integridade (Marco 4/5).
+=======================================================================
+
+O que este teste prova (e o anterior NÃO provava):
+    O teste antigo só conferia o hash MD5 após matar um nó. Mas um download
+    bem-sucedido prova apenas o FAILOVER de leitura (basta 1 réplica viva) —
+    o hash bate mesmo que ZERO re-replicação tenha ocorrido. Ou seja, dava um
+    falso "passou" para o objetivo real, que é a RÉPLICA NOVA aparecer nos
+    metadados.
+
+    Aqui a validação correta é feita lendo o metadata_index.json:
+        1. sobe um arquivo via CLI real (run_cli.py put);
+        2. lê os metadados e escolhe para matar um nó que REALMENTE guarda
+           chunk(s) deste arquivo (senão a re-replicação nem é disparada);
+        3. mata o processo desse nó;
+        4. faz POLLING do metadata_index.json até ver, nos chunks afetados,
+           o nó morto ser SUBSTITUÍDO por um nó novo (re-replicação concluída);
+        5. só então baixa e confere o MD5 (round-trip íntegro).
+
+Comandos da CLI (confirmados em dfs/interface/cli.py):
+    put <origem_local> <caminho_logico>
+    get <caminho_logico> [saida_local]
+
+Pré-requisito: o cluster precisa estar NO AR (python run_cluster.py) em outra
+janela. Rode este teste a partir da pasta Final/.
+
+LIMITAÇÃO QUE NÃO CONSEGUI TESTAR: o comando de matar o processo é específico
+do Windows (PowerShell Get-CimInstance + Stop-Process). Não consegui validá-lo
+em Linux; confirme no seu Windows que ele realmente derruba o nó (veja o passo
+[3/6] imprimir o PID encontrado). Se preferir, mate o nó na mão e comente o
+bloco do kill.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
 import os
 import subprocess
+import sys
 import time
-import hashlib
+from pathlib import Path
 
 # ==============================================================================
-# CONFIGURAÇÃO: Ajuste estes comandos de acordo com a CLI que vocês usam
-# Substitua o comando abaixo pela forma correta que vocês usam no terminal
+# CONFIGURAÇÃO
 # ==============================================================================
-CLI_UPLOAD_CMD = ["python", "-m", "dfs.interface.client", "upload", "original.txt"]
-CLI_DOWNLOAD_CMD = ["python", "-m", "dfs.interface.client", "download", "original.txt", "baixado.txt"]
+ROOT_DIR = Path(__file__).resolve().parent                      # .../Final
+METADATA_PATH = ROOT_DIR / "DFS" / "data" / "metadata" / "metadata_index.json"
 
-NODE_TO_KILL = "node3"  # Vamos assassinar este nó durante o teste
-FILE_SIZE_MB = 5        # Tamanho do arquivo gerado
+ORIGINAL = ROOT_DIR / "original.txt"
+BAIXADO = ROOT_DIR / "baixado.txt"
+CAMINHO_LOGICO = "testes/falha.bin"     # caminho lógico dentro do DFS
+FILE_SIZE_MB = 5
+
+# Comandos da CLI REAL (run_cli.py). Rodados com cwd=ROOT_DIR.
+PUT_CMD = [sys.executable, "run_cli.py", "put", str(ORIGINAL), CAMINHO_LOGICO]
+GET_CMD = [sys.executable, "run_cli.py", "get", CAMINHO_LOGICO, str(BAIXADO)]
+
+# Quanto esperar pela re-replicação. Detecção da morte ~ HEARTBEAT_DEAD(8s) +
+# WATCHER_INTERVAL(2s) ≈ 10s; somamos o round-trip Kafka + cópia do chunk.
+TIMEOUT_REREPLICACAO = 30
+POLL_INTERVALO = 1.0
 # ==============================================================================
 
-def get_file_hash(filepath: str) -> str:
-    """Gera o Hash MD5 do arquivo para garantir que não houve corrupção de 1 bit sequer."""
-    hash_md5 = hashlib.md5()
+
+def md5(filepath: Path) -> str:
+    h = hashlib.md5()
     with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
+        for bloco in iter(lambda: f.read(65536), b""):
+            h.update(bloco)
+    return h.hexdigest()
 
-def main():
-    print(f"\n{'='*50}")
-    print("🚀 INICIANDO TESTE DE RESILIÊNCIA E INTEGRIDADE DFS")
-    print(f"{'='*50}\n")
 
-    # 1. Geração de Dados
-    print(f"[1/6] Gerando arquivo de teste randômico ({FILE_SIZE_MB}MB)...")
-    with open("original.txt", "wb") as f:
-        f.write(os.urandom(FILE_SIZE_MB * 1024 * 1024))
-    
-    original_hash = get_file_hash("original.txt")
-    print(f"      -> Hash MD5 Original: {original_hash}")
+def ler_metadados() -> dict:
+    """Lê o metadata_index.json (a fonte de verdade do coordenador)."""
+    with open(METADATA_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    # 2. Upload
-    print("\n[2/6] Realizando Upload para o DFS...")
-    subprocess.run(CLI_UPLOAD_CMD, check=True)
-    print("      -> Upload concluído com sucesso.")
 
-    # 3. Assassinato do Nó (Chaos Engineering)
-    print(f"\n[3/6] Simulando falha catastrófica: Matando processo do '{NODE_TO_KILL}'...")
-    # Comando nativo do Windows (WMIC) para encontrar o processo Python específico do node3 e matá-lo
-    kill_cmd = f'wmic process where "name=\'python.exe\' and commandline like \'%--node-id {NODE_TO_KILL}%\'" call terminate'
-    subprocess.run(kill_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"      -> Nó {NODE_TO_KILL} abatido! Olhe o terminal do Cluster, o Coordenador deve notar a falta do Heartbeat.")
+def entrada_do_arquivo(meta: dict, caminho_logico: str) -> dict | None:
+    """Retorna a entrada {chunks:[...]} do arquivo, ou None se ainda não existe."""
+    return meta.get("files", {}).get(caminho_logico)
 
-    # 4. Tempo para Re-replicação (Marco 4)
-    espera_segundos = 25
-    print(f"\n[4/6] Aguardando {espera_segundos}s para o Coordenador detectar a falha e o Kafka ordenar a re-replicação...")
-    for i in range(espera_segundos, 0, -1):
-        print(f"      Aguardando... {i}s", end="\r")
-        time.sleep(1)
-    print("      -> Tempo de recuperação esgotado. Iniciando resgate dos dados...")
 
-    # 5. Download e Resgate
-    print("\n[5/6] Fazendo Download do arquivo reconstruído...")
-    if os.path.exists("baixado.txt"):
-        os.remove("baixado.txt")
-    
-    subprocess.run(CLI_DOWNLOAD_CMD, check=True)
-    print("      -> Download concluído.")
+def mapa_chunk_replicas(entrada: dict) -> dict[str, list[str]]:
+    """{chunk_id: [node_id, ...]} a partir da entrada de metadados do arquivo."""
+    return {c["chunk_id"]: list(c.get("replicas", [])) for c in entrada.get("chunks", [])}
 
-    # 6. Prova de Integridade
-    print("\n[6/6] Verificando integridade matemática dos dados...")
-    downloaded_hash = get_file_hash("baixado.txt")
-    print(f"      -> Hash MD5 Baixado:  {downloaded_hash}")
 
-    print(f"\n{'='*50}")
-    if original_hash == downloaded_hash:
-        print("✅ RESULTADO FINAL: SUCESSO ABSOLUTO! 🎉")
-        print("   O sistema perdeu um nó abruptamente, mas o Kafka e o ReplicationManager")
-        print("   salvaram os chunks. A integridade do arquivo é de 100%.")
+def matar_no_windows(node_id: str) -> None:
+    """
+    Mata o processo do nó no Windows SEM usar wmic (deprecado no Win11 recente).
+    Procura o python cujo CommandLine contém '--node-id <node_id>' e o derruba.
+    """
+    ps = (
+        "Get-CimInstance Win32_Process | "
+        f"Where-Object {{ $_.CommandLine -like '*--node-id {node_id}*' }} | "
+        "ForEach-Object { Write-Output $_.ProcessId; Stop-Process -Id $_.ProcessId -Force }"
+    )
+    resultado = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", ps],
+        capture_output=True, text=True,
+    )
+    pids = resultado.stdout.strip()
+    if pids:
+        print(f"      -> PID(s) derrubado(s) para {node_id}: {pids}")
     else:
-        print("🚨 RESULTADO FINAL: FALHA DE INTEGRIDADE!")
-        print("   Os hashes não batem. O arquivo corrompeu ou a re-replicação falhou.")
-    print(f"{'='*50}\n")
+        print(f"      ⚠️ Nenhum processo encontrado para {node_id}. "
+              f"O nó não foi morto — verifique o comando de kill. stderr={resultado.stderr.strip()}")
+
+
+def main() -> None:
+    print(f"\n{'='*60}")
+    print("🚀 TESTE DE TOLERÂNCIA A FALHAS (re-replicação + integridade)")
+    print(f"{'='*60}\n")
+
+    if not METADATA_PATH.exists():
+        print(f"❌ metadata_index.json não encontrado em {METADATA_PATH}. "
+              f"O cluster está no ar (python run_cluster.py)?")
+        return
+
+    # 1. Gera o arquivo
+    print(f"[1/6] Gerando arquivo de teste ({FILE_SIZE_MB}MB)...")
+    ORIGINAL.write_bytes(os.urandom(FILE_SIZE_MB * 1024 * 1024))
+    hash_original = md5(ORIGINAL)
+    print(f"      -> MD5 original: {hash_original}")
+
+    # 2. Upload via CLI real
+    print(f"\n[2/6] Upload via CLI: {' '.join(PUT_CMD)}")
+    subprocess.run(PUT_CMD, cwd=str(ROOT_DIR), check=True)
+
+    # Lê os metadados e confirma que o arquivo realmente entrou
+    meta = ler_metadados()
+    entrada = entrada_do_arquivo(meta, CAMINHO_LOGICO)
+    if entrada is None:
+        print(f"❌ '{CAMINHO_LOGICO}' não apareceu nos metadados após o put. Abortando.")
+        return
+
+    replicas_antes = mapa_chunk_replicas(entrada)
+    print(f"      -> {len(replicas_antes)} chunk(s) gravado(s). Réplicas (antes):")
+    for cid, reps in replicas_antes.items():
+        print(f"         {cid}: {reps}")
+
+    # 3. Escolhe um nó que REALMENTE guarda chunk deste arquivo e o mata
+    nos_com_chunk: dict[str, int] = {}
+    for reps in replicas_antes.values():
+        for nid in reps:
+            nos_com_chunk[nid] = nos_com_chunk.get(nid, 0) + 1
+    if not nos_com_chunk:
+        print("❌ Nenhuma réplica registrada para o arquivo. Abortando.")
+        return
+
+    no_alvo = max(nos_com_chunk, key=lambda n: nos_com_chunk[n])
+    chunks_afetados = [cid for cid, reps in replicas_antes.items() if no_alvo in reps]
+    print(f"\n[3/6] Matando '{no_alvo}' (guarda {nos_com_chunk[no_alvo]} chunk(s) deste arquivo)...")
+    matar_no_windows(no_alvo)
+
+    # 4. Polling dos metadados até a re-replicação concluir
+    print(f"\n[4/6] Aguardando re-replicação (até {TIMEOUT_REREPLICACAO}s)...")
+    print("      Critério: em cada chunk afetado, o nó morto sai e um nó novo entra.")
+    inicio = time.time()
+    rereplicado = False
+    while time.time() - inicio < TIMEOUT_REREPLICACAO:
+        time.sleep(POLL_INTERVALO)
+        try:
+            entrada_agora = entrada_do_arquivo(ler_metadados(), CAMINHO_LOGICO)
+        except (json.JSONDecodeError, FileNotFoundError):
+            continue  # coordenador pode estar reescrevendo o índice agora
+        if entrada_agora is None:
+            continue
+        replicas_agora = mapa_chunk_replicas(entrada_agora)
+
+        # Re-replicado = para TODO chunk afetado, o nó morto saiu E há uma réplica
+        # nova (que não estava antes naquele chunk).
+        ok = True
+        for cid in chunks_afetados:
+            antes = set(replicas_antes.get(cid, []))
+            agora = set(replicas_agora.get(cid, []))
+            saiu_o_morto = no_alvo not in agora
+            entrou_alguem_novo = bool(agora - (antes - {no_alvo}))
+            if not (saiu_o_morto and entrou_alguem_novo):
+                ok = False
+                break
+        if ok:
+            rereplicado = True
+            decorrido = time.time() - inicio
+            print(f"      ✅ Re-replicação detectada em ~{decorrido:.1f}s. Réplicas (depois):")
+            for cid in chunks_afetados:
+                print(f"         {cid}: {replicas_agora.get(cid)}")
+            break
+
+    if not rereplicado:
+        print(f"      ❌ Em {TIMEOUT_REREPLICACAO}s os metadados NÃO mostraram a réplica nova "
+              f"nos chunks afetados. (Confira os logs do coordenador/nó: '[watcher] DEAD', "
+              f"'[Kafka] Replicando ... concluída', '[replication] metadados atualizados'.)")
+
+    # 5. Download e 6. integridade (failover garante leitura mesmo sem re-replicação)
+    print(f"\n[5/6] Download via CLI: {' '.join(GET_CMD)}")
+    if BAIXADO.exists():
+        BAIXADO.unlink()
+    subprocess.run(GET_CMD, cwd=str(ROOT_DIR), check=True)
+
+    print("\n[6/6] Verificando integridade (MD5)...")
+    hash_baixado = md5(BAIXADO)
+    print(f"      original: {hash_original}")
+    print(f"      baixado : {hash_baixado}")
+    integro = hash_original == hash_baixado
+
+    print(f"\n{'='*60}")
+    print(f"  Integridade (round-trip): {'✅ OK' if integro else '❌ FALHOU'}")
+    print(f"  Re-replicação nos metadados: {'✅ OK' if rereplicado else '❌ NÃO CONFIRMADA'}")
+    print(f"{'='*60}\n")
+
 
 if __name__ == "__main__":
     main()
