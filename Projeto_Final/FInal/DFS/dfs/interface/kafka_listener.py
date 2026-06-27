@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import json
 import threading
-import grpc
 import os
+import time
+import grpc
 from kafka import KafkaConsumer
 
 from dfs.cluster.node_registry import NodeRegistry
 from dfs.storage.local_storage import LocalStorage
 from dfs.pb import dfs_pb2, dfs_pb2_grpc
 from dfs.cluster.control_client import ControlClient
+from dfs.cluster.replication_client import ReplicationClient
+
 
 class DataPlaneCommandListener:
     def __init__(self, node_id: str, storage: LocalStorage, broker_url: str = None):
@@ -19,11 +22,10 @@ class DataPlaneCommandListener:
         self.registry = NodeRegistry()
         self.control_client = ControlClient()
         self.topic = f'storage-node-{node_id}-commands'
-        
+
         self.broker_url = broker_url or os.getenv("KAFKA_BROKER_URL", "127.0.0.1:9092")
-        
+
         # Sistema de retries (tenta 5 vezes antes de falhar)
-        import time
         max_retries = 5
         for attempt in range(max_retries):
             try:
@@ -52,7 +54,7 @@ class DataPlaneCommandListener:
             try:
                 command = message.value
                 action = command.get('action')
-                
+
                 if action == 'REPLICATE_CHUNK':
                     self._handle_replicate(command)
                 else:
@@ -61,7 +63,16 @@ class DataPlaneCommandListener:
                 print(f"[{self.node_id}] [Kafka] Erro no processamento da mensagem: {e}")
 
     def _transfer_chunk(self, chunk_id: str, target_node_id: str) -> bool:
-        """COMPONENTE CENTRALIZADO: Lida com a transferência gRPC de um chunk."""
+        """
+        Copia um chunk LOCAL para o nó de destino via gRPC.
+
+        CORREÇÃO: StoreChunk é uma RPC CLIENT-STREAMING — precisa de um ITERADOR
+        de StoreChunkRequest (em pedaços de STREAM_SIZE), não de uma mensagem
+        única. Passar uma mensagem só causava o erro
+        'StatusCode.UNKNOWN: Exception iterating requests!'.
+        Reusamos o ReplicationClient.store_chunk(), o MESMO cliente de streaming
+        usado no fan-out do upload (já testado), em vez de reinventar a chamada.
+        """
         try:
             # 1. Valida se o chunk existe localmente
             if chunk_id not in self.storage.list_chunk_ids():
@@ -69,29 +80,46 @@ class DataPlaneCommandListener:
                 return False
 
             # --- SIMULAÇÃO DE ATRASO DE REDE ---
-            import os
-            import time
             delay = float(os.getenv("NETWORK_DELAY", "0.0"))
             if delay > 0:
                 print(f"[{self.node_id}] [Simulação] Atraso de rede: dormindo {delay}s...")
                 time.sleep(delay)
             # -----------------------------------
+
             data = self.storage.read_chunk(chunk_id)
             target_node = self.registry.get(target_node_id)
-            target_address = f"{target_node.host}:{target_node.port}"
-            
-            # 2. Transfere via gRPC
-            with grpc.insecure_channel(target_address) as channel:
-                stub = dfs_pb2_grpc.ReplicationServiceStub(channel)
-                stub.StoreChunk(dfs_pb2.StoreChunkRequest(chunk_id=chunk_id, data=data))
-            
+
+            # Deriva chunk_index e upload_id do chunk_id "<upload_id>_chunk_<idx>".
+            # O servidor StoreChunk só usa chunk_id + bytes, mas preenchemos os
+            # metadados para a mensagem ficar coerente com o fan-out do upload.
+            if "_chunk_" in chunk_id:
+                upload_id, _, idx_str = chunk_id.rpartition("_chunk_")
+                chunk_index = int(idx_str) if idx_str.isdigit() else 0
+            else:
+                upload_id, chunk_index = chunk_id, 0
+
+            # 2. Transfere via gRPC (client-streaming correto, em STREAM_SIZE)
+            cli = ReplicationClient(target_node.host, target_node.port)
+            try:
+                resp = cli.store_chunk(
+                    chunk_id=chunk_id,
+                    chunk_index=chunk_index,
+                    upload_id=upload_id,
+                    origin_node_id=self.node_id,
+                    data=data,
+                )
+            finally:
+                cli.close()
+
+            if not getattr(resp, "ok", False):
+                print(f"[{self.node_id}] [Kafka] Destino recusou o chunk '{chunk_id}': {resp.message}")
+                return False
             return True
         except Exception as e:
             print(f"[{self.node_id}] [Kafka] Erro na transferência via gRPC do chunk '{chunk_id}': {e}")
             return False
 
     def _handle_replicate(self, command: dict) -> None:
-   
         chunk_id = command.get('chunk_id')
         target_node_id = command.get('target_node_id')      # DESTINO
         removed_node_id = command.get('removed_node_id')    # nó morto (fecha o ciclo)
