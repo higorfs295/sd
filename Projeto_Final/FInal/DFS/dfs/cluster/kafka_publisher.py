@@ -7,7 +7,17 @@ from kafka import KafkaProducer
 
 class ClusterEventPublisher:
     """
-    Publica comandos no Kafka (ex.: REPLICATE_CHUNK na re-replicação).
+    Publica eventos no Kafka. Tem dois usos hoje:
+
+      1. COMANDOS DE RE-REPLICAÇÃO (crítico):
+         `publish_storage_command(...)` envia ordens REPLICATE_CHUNK ao tópico
+         do Storage Node fonte. Se isso falhar, a re-replicação não acontece,
+         então aqui o erro é PROPAGADO (o watcher tenta de novo no próximo ciclo).
+
+      2. MÉTRICAS DE TELEMETRIA (observabilidade, não crítico):
+         `publish_metric(...)` envia tempos de operação ao tópico 'cluster-metrics',
+         consumido pelo telemetry_hub.py. Aqui o erro é ENGOLIDO de propósito: se o
+         Kafka não estiver no ar, quem chama (ex.: o benchmark) roda do mesmo jeito.
 
     CONEXÃO PREGUIÇOSA (correção importante):
         Antes, o KafkaProducer era criado já no __init__. Isso fazia o coordenador
@@ -23,10 +33,17 @@ class ClusterEventPublisher:
         o broker ja esta pronto, e o coordenador sempre usa o publisher real.
     """
 
+    # Tópico onde o telemetry_hub.py escuta as métricas de performance.
+    METRICS_TOPIC = "cluster-metrics"
+
     def __init__(self, broker_url: str = None):
         self.broker_url = broker_url or os.getenv("KAFKA_BROKER_URL", "localhost:9092")
         # Conexao preguicosa: o produtor so e criado no primeiro publish.
         self._producer = None
+        # Se a publicacao de metricas falhar uma vez (Kafka fora), desliga a
+        # telemetria nesta execucao para nao repetir a espera de conexao a cada
+        # chamada (importante para o benchmark nao travar metrica a metrica).
+        self._metrics_disabled = False
 
     def _get_producer(self, max_retries: int = 5, delay: float = 3.0):
         """
@@ -65,3 +82,51 @@ class ClusterEventPublisher:
         producer.send(topic, value=command)
         producer.flush()
         print(f"[Publisher] Comando enviado para '{topic}': {command['action']}")
+
+    def publish_metric(self, operation: str, duration_seconds: float, extra: dict = None) -> None:
+        """
+        Publica uma metrica de performance no topico 'cluster-metrics'.
+
+        O telemetry_hub.py espera, por mensagem, um JSON com pelo menos:
+            - "operation":        str    (ex.: "upload", "download")
+            - "duration_seconds": float  (tempo da operacao em segundos)
+        Chaves extras (ex.: tamanho_mb, nos_ativos) sao ignoradas pelo hub atual,
+        mas vao junto para uso futuro / depuracao.
+
+        TOLERANTE A FALHA DE PROPOSITO: metrica e observabilidade, nao dado critico.
+        Se o Kafka nao estiver no ar, esta funcao NUNCA quebra nem trava quem chama
+        (o benchmark roda igual). No primeiro fracasso ela se autodesliga, para nao
+        repetir a espera de conexao a cada chamada.
+        """
+        if self._metrics_disabled:
+            return
+
+        evento = {
+            "operation": str(operation),
+            "duration_seconds": float(duration_seconds),
+        }
+        if extra:
+            evento.update(extra)
+
+        try:
+            # Poucas tentativas: a metrica nao pode segurar o benchmark.
+            producer = self._get_producer(max_retries=1, delay=0.0)
+            producer.send(self.METRICS_TOPIC, value=evento)
+            producer.flush()
+        except Exception as exc:
+            self._metrics_disabled = True
+            print(
+                f"[Publisher] (metrica) Kafka indisponivel — telemetria desativada "
+                f"nesta execucao: {exc}"
+            )
+
+    def close(self) -> None:
+        """Fecha o produtor com flush, se ele chegou a ser criado. Idempotente."""
+        if self._producer is not None:
+            try:
+                self._producer.flush()
+                self._producer.close()
+            except Exception:
+                pass
+            finally:
+                self._producer = None
