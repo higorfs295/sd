@@ -19,9 +19,13 @@ from dfs.storage.local_storage import LocalStorage
 from dfs.pb import dfs_pb2_grpc, dataplane_pb2_grpc
 
 from .kafka_listener import DataPlaneCommandListener
+from pathlib import Path
+from dfs.cluster.node_registry import NodeRegistry, NodeInfo
+
 
 class HeartbeatWorker:
     """Isola a responsabilidade de comunicação periódica com o Control Plane."""
+
     def __init__(self, node: any, storage: LocalStorage):
         self.node = node
         self.storage = storage
@@ -32,65 +36,95 @@ class HeartbeatWorker:
 
     def _loop(self) -> None:
         # Garante que tens a biblioteca os importada (podes colocar no topo do ficheiro)
-        import os 
-        
+        import os
+
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
             try:
                 # 1. Guarda a resposta do Coordenador numa variável
                 resposta = self.client.heartbeat(
-                    self.node.node_id, 
+                    self.node.node_id,
                     shutil.disk_usage(self.node.storage_dir).free,
-                    0, 0, self.storage.list_chunk_ids() # Atenção: usa o método que já tens aí no teu código original
+                    0,
+                    0,
+                    self.storage.list_chunk_ids(),  # Atenção: usa o método que já tens aí no teu código original
                 )
+                # print(f"[{self.node.node_id}] heartbeat OK")  # linha de depuração
 
-#----------------para todos os efeitos, aqui chamamos o gc, dentro do loop do heartbeat, então é correlato ao m5.
-                if hasattr(resposta, 'chunks_to_delete') and resposta.chunks_to_delete:
+                # ----------------para todos os efeitos, aqui chamamos o gc, dentro do loop do heartbeat, então é correlato ao m5.
+                if hasattr(resposta, "chunks_to_delete") and resposta.chunks_to_delete:
                     for chunk_id in resposta.chunks_to_delete:
                         try:
-                            # Delega ao LocalStorage: ele resolve o caminho correto
-                            # (<storage_dir>/chunks/<chunk_id>) pela MESMA lógica do
-                            # store_chunk, então escrita e exclusão nunca divergem.
                             # delete_chunk retorna True se apagou, False se não achou.
                             if self.storage.delete_chunk(chunk_id):
-                                print(f"🧹 [{self.node.node_id}] LIXO COLETADO: Chunk {chunk_id} foi apagado do disco.")
+                                print(
+                                    f"🧹 [{self.node.node_id}] LIXO COLETADO: Chunk {chunk_id} foi apagado do disco."
+                                )
                             else:
-                                print(f"⚠️ [{self.node.node_id}] Chunk {chunk_id} já não existe no disco.")
+                                print(
+                                    f"⚠️ [{self.node.node_id}] Chunk {chunk_id} já não existe no disco."
+                                )
                         except Exception as erro_io:
-                            print(f"🚨 [{self.node.node_id}] Erro de I/O ao apagar {chunk_id}: {erro_io}")
-#------------- 
+                            print(
+                                f"🚨 [{self.node.node_id}] Erro de I/O ao apagar {chunk_id}: {erro_io}"
+                            )
+            # -------------
 
             except Exception as e:
                 # Mantém o teu print ou log de erro que já tinhas antes
                 print(f"[{self.node.node_id}] Erro no heartbeat: {e}")
 
+
 class StorageNodeApp:
     """Orquestrador principal do Nó de Armazenamento (Data Plane)."""
-    def __init__(self, node_id: str, disable_heartbeat: bool):
+
+    def __init__(
+        self, node_id, disable_heartbeat, host=None, port=None, storage_dir=None
+    ):
         self.registry = NodeRegistry()
-        self.node = self.registry.get(node_id)
+        # Nó do config (node1..node5): identidade fixa.
+        # Nó inédito (elasticidade, ex.: node6): monta a identidade pelos argumentos.
+        try:
+            self.node = self.registry.get(node_id)
+        except KeyError:
+            if not (host and port and storage_dir):
+                raise SystemExit(
+                    f"Nó '{node_id}' não está no config.py. Para um nó novo, "
+                    "passe --host, --port e --storage-dir."
+                )
+            self.node = NodeInfo(
+                node_id=node_id,
+                host=host,
+                port=int(port),
+                storage_dir=Path(storage_dir),
+            )
         self.storage = LocalStorage(root=self.node.storage_dir)
         self.plans = PlanStore()
         self.disable_heartbeat = disable_heartbeat
-        
+
         # Inicia a configuração do servidor gRPC
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
         self._configure_grpc_services()
 
     def _configure_grpc_services(self) -> None:
         dfs_pb2_grpc.add_DataServiceServicer_to_server(
-            DataServicer(self.storage, self.node.node_id, self.plans), self.server)
+            DataServicer(self.storage, self.node.node_id, self.plans), self.server
+        )
         dfs_pb2_grpc.add_ReplicationServiceServicer_to_server(
-            ReplicationServicer(self.storage, self.node.node_id), self.server)
+            ReplicationServicer(self.storage, self.node.node_id), self.server
+        )
         dataplane_pb2_grpc.add_DataPlaneServiceServicer_to_server(
-            DataPlaneServicer(self.plans), self.server)
-        
+            DataPlaneServicer(self.plans), self.server
+        )
+
         self.server.add_insecure_port(f"{self.node.host}:{self.node.port}")
 
     def run(self) -> None:
         # 1. Liga o Listener do Kafka
         try:
-            kafka_listener = DataPlaneCommandListener(node_id=self.node.node_id, storage=self.storage)
+            kafka_listener = DataPlaneCommandListener(
+                node_id=self.node.node_id, storage=self.storage
+            )
             kafka_listener.start()
         except Exception as e:
             print(f"[{self.node.node_id}] Erro crítico ao iniciar Kafka: {e}")
@@ -98,23 +132,57 @@ class StorageNodeApp:
         # 2. Liga o Servidor gRPC
         self.server.start()
 
+        # Anuncia-se ao coordenador (RegisterNode).
+        # Para node1..node5 é idempotente.
+        # Para um nó inédito (node6) é isto que o promove à membership canônica via _ensure_canonical_locked. Sem isto, o heartbeat de node6 seria rejeitado.
+        if not self.disable_heartbeat:
+            try:
+                livre = shutil.disk_usage(self.node.storage_dir).free
+                ControlClient().register(self.node, livre)
+                print(f"[{self.node.node_id}] Registrado no coordenador.")
+            except Exception as e:
+                print(f"[{self.node.node_id}] Falha ao registrar: {e}")
+
         # 3. Liga o Heartbeat (se permitido)
+
         if not self.disable_heartbeat:
             HeartbeatWorker(self.node, self.storage).start()
 
-        print(f"[{self.node.node_id}] Data Plane Ativo -> gRPC: {self.node.port} | Kafka: OK")
+        print(
+            f"[{self.node.node_id}] Data Plane Ativo -> gRPC: {self.node.port} | Kafka: OK"
+        )
         self.server.wait_for_termination()
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dfs-node")
     parser.add_argument("--node-id", required=True, help="identificador do nó")
-    parser.add_argument("--no-heartbeat", action="store_true", help="ignora o coordenador")
+    parser.add_argument(
+        "--no-heartbeat", action="store_true", help="ignora o coordenador"
+    )
+    parser.add_argument(
+        "--host", default=None, help="host do nó (p/ nó fora do config, ex.: node6)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=None, help="porta gRPC (p/ nó fora do config)"
+    )
+    parser.add_argument(
+        "--storage-dir", default=None, help="pasta de chunks (p/ nó fora do config)"
+    )
     return parser
+
 
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
-    app = StorageNodeApp(node_id=args.node_id, disable_heartbeat=args.no_heartbeat)
+    app = StorageNodeApp(
+        node_id=args.node_id,
+        disable_heartbeat=args.no_heartbeat,
+        host=args.host,
+        port=args.port,
+        storage_dir=args.storage_dir,
+    )
     app.run()
+
 
 if __name__ == "__main__":
     main()

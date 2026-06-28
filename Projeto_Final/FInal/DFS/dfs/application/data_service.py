@@ -9,6 +9,7 @@ DataServicer — interface da CLI com o nó (plano de dados, streaming).
 O mapa de ChunkPlacement vem do PlanStore (handoff via DataPlaneService.SetUploadPlan
 / SetDownloadPlan), resolvido por upload_id / download_id.
 """
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -25,7 +26,7 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
     def __init__(self, storage, node_id: str, plans, control_factory=ControlClient):
         self.storage = storage
         self.node_id = node_id
-        self.plans = plans                  # PlanStore compartilhado com o DataPlaneServicer
+        self.plans = plans  # PlanStore compartilhado com o DataPlaneServicer
         self._control_factory = control_factory  # injetável para teste
 
     # ------------------------------------------------------------------- PUT
@@ -36,14 +37,16 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
         total_bytes = 0
         buffer = bytearray()
         confirmados = []
-        plano_por_indice = {}   # chunk_index -> [NodeRef]
+        plano_por_indice = {}  # chunk_index -> [NodeRef]
 
         def carregar_plano():
             entrada = self.plans.get_upload(upload_id)
             if entrada is None:
-                context.abort(grpc.StatusCode.FAILED_PRECONDITION,
-                              f"sem plano para upload_id={upload_id}; "
-                              "chame SetUploadPlan antes de UploadFile")
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    f"sem plano para upload_id={upload_id}; "
+                    "chame SetUploadPlan antes de UploadFile",
+                )
             _total, chunks = entrada
             for cp in chunks:
                 plano_por_indice[cp.chunk_index] = list(cp.replicas)
@@ -51,8 +54,10 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
         def replicas_do(idx):
             reps = plano_por_indice.get(idx)
             if reps is None:
-                context.abort(grpc.StatusCode.OUT_OF_RANGE,
-                              f"chunk {idx} fora do plano (descasamento de tamanho?)")
+                context.abort(
+                    grpc.StatusCode.OUT_OF_RANGE,
+                    f"chunk {idx} fora do plano (descasamento de tamanho?)",
+                )
             return reps
 
         def fechar_chunk(idx, data):
@@ -64,9 +69,14 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
                 self.storage.store_chunk(chunk_id, data)
             # fan-out para as demais réplicas, em paralelo
             self._fan_out(chunk_id, idx, upload_id, data, reps)
-            confirmados.append(dfs_pb2.ChunkPlacement(
-                chunk_id=chunk_id, chunk_index=idx, size_bytes=len(data),
-                replicas=reps))
+            confirmados.append(
+                dfs_pb2.ChunkPlacement(
+                    chunk_id=chunk_id,
+                    chunk_index=idx,
+                    size_bytes=len(data),
+                    replicas=reps,
+                )
+            )
             chunks_written += 1
 
         for msg in request_iterator:
@@ -82,7 +92,9 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
                     chunk_index += 1
         if upload_id is None:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "upload sem upload_id")
-        if buffer or chunks_written == 0:   # último chunk (resto), inclusive arquivo vazio
+        if (
+            buffer or chunks_written == 0
+        ):  # último chunk (resto), inclusive arquivo vazio
             fechar_chunk(chunk_index, bytes(buffer))
 
         # confirma ao coordenador o que foi gravado e libera o plano
@@ -91,23 +103,34 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
             ctrl.confirm_upload(upload_id, confirmados, total_bytes)
             ctrl.close()
         except Exception as exc:  # noqa: BLE001
-            return dfs_pb2.UploadResult(ok=False, message=f"ConfirmUpload falhou: {exc}",
-                                        chunks_written=chunks_written,
-                                        total_bytes_written=total_bytes)
+            return dfs_pb2.UploadResult(
+                ok=False,
+                message=f"ConfirmUpload falhou: {exc}",
+                chunks_written=chunks_written,
+                total_bytes_written=total_bytes,
+            )
         finally:
             self.plans.clear_upload(upload_id)
 
-        return dfs_pb2.UploadResult(ok=True, message="upload concluído",
-                                    chunks_written=chunks_written,
-                                    total_bytes_written=total_bytes)
+        return dfs_pb2.UploadResult(
+            ok=True,
+            message="upload concluído",
+            chunks_written=chunks_written,
+            total_bytes_written=total_bytes,
+        )
 
     def _fan_out(self, chunk_id, idx, upload_id, data, reps):
         alvos = [r for r in reps if r.node_id != self.node_id]
 
         def enviar(r):
+            # Tentar gravar numa réplica.
+            # Se ela estiver morta/inacessível, não propaga a exceção: devolve None (= "não confirmou"), e a política de quórum W decide se ainda há réplicas vivas suficientes.
             cli = ReplicationClient(r.host, r.port)
             try:
                 return cli.store_chunk(chunk_id, idx, upload_id, self.node_id, data)
+            except Exception as e:  # noqa: BLE001
+                print(f"[{self.node_id}] réplica {r.node_id} indisponível no fan-out.")
+                return None
             finally:
                 cli.close()
 
@@ -123,16 +146,19 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
         if confirmadas < w:
             raise RuntimeError(
                 f"quórum de escrita não atingido p/ {chunk_id}: "
-                f"{confirmadas}/{w} réplicas")
+                f"{confirmadas}/{w} réplicas"
+            )
 
     # ------------------------------------------------------------------- GET
     def DownloadFile(self, request, context):
         download_id = request.download_id
         entrada = self.plans.get_download(download_id)
         if entrada is None:
-            context.abort(grpc.StatusCode.FAILED_PRECONDITION,
-                          f"sem plano para download_id={download_id}; "
-                          "chame SetDownloadPlan antes de DownloadFile")
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"sem plano para download_id={download_id}; "
+                "chame SetDownloadPlan antes de DownloadFile",
+            )
         _total, chunks = entrada
         chunks = sorted(chunks, key=lambda c: c.chunk_index)
         try:
@@ -143,9 +169,12 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
                     data = self._buscar_em_peer(cp)
                 emitido = False
                 for i in range(0, len(data), STREAM_SIZE):
-                    ultimo = (cp.chunk_index == chunks[-1].chunk_index
-                              and i + STREAM_SIZE >= len(data))
-                    yield dfs_pb2.DownloadChunk(data=data[i:i + STREAM_SIZE], is_last=ultimo)
+                    ultimo = cp.chunk_index == chunks[
+                        -1
+                    ].chunk_index and i + STREAM_SIZE >= len(data)
+                    yield dfs_pb2.DownloadChunk(
+                        data=data[i : i + STREAM_SIZE], is_last=ultimo
+                    )
                     emitido = True
                 if not emitido:  # chunk vazio
                     ultimo = cp.chunk_index == chunks[-1].chunk_index

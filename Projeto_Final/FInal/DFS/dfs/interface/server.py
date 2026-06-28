@@ -100,6 +100,11 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         # Base da camada temporal: só confirmamos como órfão o que esteve suspeito em dois ciclos seguidos.
         self._suspected_orphans: dict[str, set[str]] = {}
 
+        # Deleções pendentes: chunks que não puderam ser apagados porque o nó estava morto no momento do DeleteFile.
+        # Entregues no próximo heartbeat do nó.
+        self._pending_deletes: dict[str, set[str]] = {}
+        self._lock_pending_deletes = threading.Lock()
+
     def ListFiles(self, request, context):
         """
         Devolve a lista de arquivos conhecidos pelo coordenador.
@@ -213,6 +218,18 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             node_id=request.node_id,
             block_report=set(request.chunk_ids),
         )
+
+        # Entrega deleções pendentes deste nó (chunks que o DeleteFile não pôde apagar porque o nó estava morto na hora).
+        with self._lock_pending_deletes:
+            pendentes = self._pending_deletes.pop(request.node_id, set())
+        if pendentes:
+            print(
+                f"[DeleteFile] nó {request.node_id} reconectado. "
+                f"Enviando {len(pendentes)} deleção(ões) pendente(s): "
+                f"{sorted(pendentes)}"
+            )
+            # Une com os órfãos detectados (pode haver sobreposição, set() elimina duplicatas).
+            chunks_to_delete = sorted(set(chunks_to_delete) | pendentes)
 
         return dfs_pb2.HeartbeatResponse(ok=True, chunks_to_delete=chunks_to_delete)
 
@@ -669,14 +686,26 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
                 )
                 tarefas[futuro] = node_id
 
-            # Conforme cada tarefa termina, somamos seus resultados ao total.
-            # as_completed devolve os futuros na ordem em que TERMINAM (não na de submissão), o que é exatamente o que queremos: agregamos quem acabar primeiro.
             for futuro in futures.as_completed(tarefas):
                 node_id = tarefas[futuro]
                 ok, falhas = futuro.result()
                 total_ok += ok
                 total_falhas += falhas
-                print(f"[DeleteFile] nó {node_id}: {ok} apagado(s), {falhas} falha(s)")
+
+                if falhas > 0:
+                    # Nó estava inacessível: guarda os chunks que não pôde apagar.
+                    # No próximo heartbeat, o coordenador os envia em chunks_to_delete.
+                    chunks_pendentes = set(chunks_por_no[node_id][:falhas])
+                    with self._lock_pending_deletes:
+                        self._pending_deletes.setdefault(node_id, set()).update(
+                            chunks_por_no[node_id]
+                        )
+                    print(
+                        f"[DeleteFile] nó {node_id}: inacessível. "
+                        f"{falhas} chunk(s) pendentes serão apagados quando o nó reconectar."
+                    )
+                else:
+                    print(f"[DeleteFile] nó {node_id}: {ok} apagado(s), 0 falha(s)")
 
         # 4. Remover os metadados e responder
         # Removemos mesmo que algumas deleções físicas tenham falhado: o arquivo deixa de existir logicamente.
