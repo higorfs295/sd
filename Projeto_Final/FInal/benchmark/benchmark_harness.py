@@ -1,11 +1,30 @@
 import os
+import sys
 import time
 import csv
 import random
 import string
 import logging
 import argparse
-from DFS.dfs.client import DataClient as DFSClient
+from pathlib import Path
+
+# --- Bootstrap de path (mesma técnica do run_cli.py) -------------------------
+# Este script vive em Final/benchmark/, mas o pacote 'dfs' está em Final/DFS/.
+# Inserimos Final/DFS no sys.path para que 'import dfs...' resolva INDEPENDENTE
+# de onde você roda (da raiz Final/, de dentro de benchmark/, por caminho
+# absoluto, etc.). Sem isto, rodar de dentro de benchmark/ dá
+# 'ModuleNotFoundError: No module named DFS', porque o Python põe no path a
+# pasta do SCRIPT, não a raiz do projeto.
+_DFS_DIR = Path(__file__).resolve().parent.parent / "DFS"
+if str(_DFS_DIR) not in sys.path:
+    sys.path.insert(0, str(_DFS_DIR))
+# -----------------------------------------------------------------------------
+
+from dfs.client import DataClient as DFSClient
+
+# Pasta padrão de saída dos CSVs: Final/benchmark/csv/ (ancorada no SCRIPT, não no
+# cwd) -> o CSV nunca cai na raiz do projeto, rode você de onde rodar.
+_CSV_DIR = Path(__file__).resolve().parent / "csv"
 
 # Configuração de Logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -15,7 +34,8 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="DFS Benchmark Harness - Marco 5")
     parser.add_argument('--host', type=str, default='localhost', help='Coordenador Host')
     parser.add_argument('--port', type=int, default=50051, help='Coordenador Port')
-    parser.add_argument('--output', type=str, default='resultados_benchmark.csv', help='Arquivo CSV de saída')
+    parser.add_argument('--output', type=str, default='resultados_benchmark.csv',
+                        help='Nome do CSV (gravado em benchmark/csv/) ou um caminho absoluto')
     parser.add_argument('--nodes', type=int, default=5, help='Número de nós ativos no teste atual')
     parser.add_argument('--iter', type=int, default=3, help='Número de iterações por tamanho')
     parser.add_argument('--sizes', type=int, nargs='+', default=[1, 5, 10, 25, 50], help='Tamanhos em MB (ex: --sizes 1 10 50)')
@@ -32,14 +52,21 @@ def generate_dummy_file(filename, size_mb):
 
 def run_benchmark():
     args = parse_arguments()
-    
+
+    # Destino do CSV: se --output for absoluto, respeita; senão, grava em
+    # Final/benchmark/csv/<nome>. A pasta é criada se não existir.
+    out_path = Path(args.output)
+    if not out_path.is_absolute():
+        out_path = _CSV_DIR / out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
     # IMPORTANTE: O benchmark deve apontar para o COORDENADOR (porta padrão do config ou repassada por argumento)
     # se o DataClient de alto nível usa o ControlClient internamente.
     client = DFSClient(args.host, args.port)
 
     # Escrever cabeçalho do CSV se não existir
-    if not os.path.exists(args.output):
-        with open(args.output, mode='w', newline='') as file:
+    if not out_path.exists():
+        with open(out_path, mode='w', newline='') as file:
             writer = csv.writer(file)
             writer.writerow(['operacao', 'tamanho_mb', 'tempo_segundos', 'throughput_mbs', 'nos_ativos'])
 
@@ -67,7 +94,7 @@ def run_benchmark():
                 throughput_down = size / download_time
                 
                 # Salvar os resultados no CSV
-                with open(args.output, mode='a', newline='') as file:
+                with open(out_path, mode='a', newline='') as file:
                     writer = csv.writer(file)
                     writer.writerow(['upload', size, round(upload_time, 4), round(throughput_up, 4), args.nodes])
                     writer.writerow(['download', size, round(download_time, 4), round(throughput_down, 4), args.nodes])
@@ -81,7 +108,7 @@ def run_benchmark():
         if os.path.exists(local_filename): os.remove(local_filename)
         if os.path.exists(download_filename): os.remove(download_filename)
 
-    logger.info(f"Benchmark finalizado. Arquivo salvo em: {args.output}")
+    logger.info(f"Benchmark finalizado. Arquivo salvo em: {out_path}")
 
 if __name__ == "__main__":
     run_benchmark()

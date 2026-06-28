@@ -1,21 +1,30 @@
+import os
+from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import os
+
+# Caminhos ancorados na pasta do SCRIPT (Final/benchmark/), não no cwd:
+#   - lê o CSV de benchmark/csv/
+#   - salva os gráficos em benchmark/graficos/
+# Assim o plot roda de qualquer diretório, igual ao harness.
+_HERE = Path(__file__).resolve().parent
+CSV_FILE = _HERE / "csv" / "resultados_benchmark.csv"
+GRAFICOS_DIR = _HERE / "graficos"
 
 # Configuração visual profissional
 sns.set_theme(style="whitegrid", palette="muted")
 
 def main():
-    csv_file = 'resultados_benchmark.csv'
-    if not os.path.exists(csv_file):
-        print(f"Erro: Arquivo '{csv_file}' não encontrado.")
+    if not CSV_FILE.exists():
+        print(f"Erro: Arquivo '{CSV_FILE}' não encontrado.")
+        print("Rode o benchmark_harness.py primeiro (ele grava em benchmark/csv/).")
         return
 
-    df = pd.read_csv(csv_file)
-    
+    df = pd.read_csv(CSV_FILE)
+
     # Cria diretório para salvar gráficos
-    os.makedirs('graficos', exist_ok=True)
+    GRAFICOS_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Gráfico de Throughput (Vazão) vs Tamanho do Arquivo
     plt.figure(figsize=(10, 6))
@@ -26,7 +35,7 @@ def main():
     plt.ylabel('Throughput (MB/s)', fontsize=12)
     plt.legend(title='Operação')
     plt.tight_layout()
-    plt.savefig('graficos/01_throughput_vs_tamanho.png', dpi=300)
+    plt.savefig(GRAFICOS_DIR / '01_throughput_vs_tamanho.png', dpi=300)
     plt.close()
 
     # 2. Gráfico de Latência (Tempo) vs Tamanho do Arquivo
@@ -37,7 +46,7 @@ def main():
     plt.ylabel('Tempo (Segundos)', fontsize=12)
     plt.legend(title='Operação')
     plt.tight_layout()
-    plt.savefig('graficos/02_latencia_vs_tamanho.png', dpi=300)
+    plt.savefig(GRAFICOS_DIR / '02_latencia_vs_tamanho.png', dpi=300)
     plt.close()
 
     # 3. Gráfico de Elasticidade: Latência vs Número de Nós
@@ -49,10 +58,10 @@ def main():
         plt.xlabel('Número de Nós Ativos', fontsize=12)
         plt.ylabel('Tempo (Segundos)', fontsize=12)
         plt.tight_layout()
-        plt.savefig('graficos/03_elasticidade_latencia.png', dpi=300)
+        plt.savefig(GRAFICOS_DIR / '03_elasticidade_latencia.png', dpi=300)
         plt.close()
 
-    print("✅ Gráficos gerados com sucesso na pasta 'graficos/'!")
+    print(f"✅ Gráficos gerados com sucesso em '{GRAFICOS_DIR}'!")
 
 if __name__ == "__main__":
     main()
