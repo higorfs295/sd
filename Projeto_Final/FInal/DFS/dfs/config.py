@@ -5,6 +5,7 @@ A ideia é centralizar portas, nós e caminhos de armazenamento para evitar valo
 """
 
 from pathlib import Path
+import os
 
 # Raiz do projeto calculada dinamicamente a partir deste arquivo
 # Isso evita caminhos fixos e deixa o projeto mais portátil entre sistemas operacionais
@@ -12,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 
 # Endereço e porta do coordenador
 # O coordenador é o ponto de entrada do sistema distribuído
-HOST = "127.0.0.1"
+HOST = os.getenv("COORDINATOR_HOST", "127.0.0.1")
 PORT = 9100
 
 # Mantém nomes explícitos para o coordenador
@@ -69,7 +70,7 @@ def build_nodes(count: int, base_port: int = BASE_NODE_PORT) -> dict[str, dict]:
     """
     return {
         f"node{i}": {
-            "host": "127.0.0.1",
+            "host": os.getenv(f"node{i}_HOST".upper(), os.getenv("NODE_HOST", "127.0.0.1")),
             "port": base_port + i - 1,
             "storage_dir": DATA_DIR / "nodes" / f"node{i}",
         }

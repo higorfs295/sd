@@ -38,3 +38,7 @@ DFS_M3/data/metadata/metadata_index.json
 # ─── Stubs gerados pelo compilador protoc (regenerar localmente) ──────────────
 DFS_M3/dfs/pb/dfs_pb2.py
 DFS_M3/dfs/pb/dfs_pb2_grpc.py
+# Fixtures geradas pelos testes em runtime (não versionar)
+original.txt
+baixado.txt
+teste_rede.txt
