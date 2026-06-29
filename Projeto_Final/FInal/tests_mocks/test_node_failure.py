@@ -45,7 +45,7 @@ from pathlib import Path
 # ==============================================================================
 # CONFIGURAÇÃO
 # ==============================================================================
-ROOT_DIR = Path(__file__).resolve().parent                      # .../Final
+ROOT_DIR = Path(__file__).resolve().parent.parent  # Final/
 METADATA_PATH = ROOT_DIR / "DFS" / "data" / "metadata" / "metadata_index.json"
 
 ORIGINAL = ROOT_DIR / "original.txt"
