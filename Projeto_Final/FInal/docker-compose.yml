@@ -1,5 +1,19 @@
-# version: '3.8'
-#commit
+# Cluster DFS completo: Kafka + coordenador + 5 nós, todos na mesma rede compose.
+# A app continua podendo rodar no host via run_cluster.py; este compose é a via containerizada.
+
+x-app-env: &app-env
+  # Onde os nós/CLI acham o coordenador (e onde o coordenador faz bind do próprio nome).
+  COORDINATOR_HOST: coordinator
+  # Host anunciado de cada nó. Cada container resolve "nodeN" via DNS do compose.
+  # Precisa estar em TODOS os containers por causa da re-replicação (nó-fonte resolve o destino pelo config local).
+  NODE1_HOST: node1
+  NODE2_HOST: node2
+  NODE3_HOST: node3
+  NODE4_HOST: node4
+  NODE5_HOST: node5
+  # Broker interno do Kafka (listener INTERNAL). NÃO usar localhost:9092 dentro da rede.
+  KAFKA_BROKER_URL: kafka-1:29092
+
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.0
@@ -25,7 +39,6 @@ services:
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:29092,EXTERNAL://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
-      # Força o Kafka a replicar tópicos internos nos dois brokers
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
       KAFKA_OPTS: "-XX:-UseContainerSupport"
 
@@ -45,3 +58,75 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
       KAFKA_OPTS: "-XX:-UseContainerSupport"
+
+  # ---------------- App DFS ----------------
+  coordinator:
+    build: .
+    image: dfs-app:local
+    container_name: dfs-coordinator
+    depends_on:
+      - kafka-1
+      - kafka-2
+    command: ["python", "-m", "dfs.interface.server"]
+    environment:
+      <<: *app-env
+    ports:
+      - "9100:9100"
+    volumes:
+      # Necessário para o test_chaos_advanced controlar (kill/start) os containers de nó.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  node1:
+    image: dfs-app:local
+    container_name: dfs-node1
+    depends_on:
+      - coordinator
+    command: ["python", "-m", "dfs.interface.storage_node", "--node-id", "node1"]
+    environment:
+      <<: *app-env
+    ports:
+      - "9101:9101"
+
+  node2:
+    image: dfs-app:local
+    container_name: dfs-node2
+    depends_on:
+      - coordinator
+    command: ["python", "-m", "dfs.interface.storage_node", "--node-id", "node2"]
+    environment:
+      <<: *app-env
+    ports:
+      - "9102:9102"
+
+  node3:
+    image: dfs-app:local
+    container_name: dfs-node3
+    depends_on:
+      - coordinator
+    command: ["python", "-m", "dfs.interface.storage_node", "--node-id", "node3"]
+    environment:
+      <<: *app-env
+    ports:
+      - "9103:9103"
+
+  node4:
+    image: dfs-app:local
+    container_name: dfs-node4
+    depends_on:
+      - coordinator
+    command: ["python", "-m", "dfs.interface.storage_node", "--node-id", "node4"]
+    environment:
+      <<: *app-env
+    ports:
+      - "9104:9104"
+
+  node5:
+    image: dfs-app:local
+    container_name: dfs-node5
+    depends_on:
+      - coordinator
+    command: ["python", "-m", "dfs.interface.storage_node", "--node-id", "node5"]
+    environment:
+      <<: *app-env
+    ports:
+      - "9105:9105"

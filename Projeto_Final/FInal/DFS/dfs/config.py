@@ -70,7 +70,7 @@ def build_nodes(count: int, base_port: int = BASE_NODE_PORT) -> dict[str, dict]:
     return {
         f"node{i}": {
             "host": os.getenv(f"node{i}_HOST".upper(), os.getenv("NODE_HOST", "127.0.0.1")),
-            "port": os.getenv(f"node{i}_PORT".upper(), base_port + i - 1),
+            "port": base_port + i - 1,
             "storage_dir": DATA_DIR / "nodes" / f"node{i}",
         }
         for i in range(1, count + 1)
