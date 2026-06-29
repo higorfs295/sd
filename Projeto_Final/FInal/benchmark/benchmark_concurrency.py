@@ -1,13 +1,9 @@
 """
-DFS - Benchmark de CONCORRÊNCIA (variação da taxa de requisições)
-=================================================================
-Complementa o benchmark_harness.py (que mede VOLUME, em série) medindo o eixo que
-faltava da spec: "variação da taxa de requisições" — ou seja, vários CLIENTES
-disparando uploads/downloads AO MESMO TEMPO.
+Benchmark de Concorrência(variação da taxa de requisições)
+Complementa o benchmark_harness.py (que mede volume, em série) medindo variação da taxa de requisições, ou seja, vários clientes disparando uploads/downloads ao mesmo tempo.
 
 Para cada nível de concorrência C (ex.: 1, 2, 4, 8, 16) e cada tamanho de arquivo:
-  1. dispara C uploads simultâneos (um ThreadPoolExecutor, C workers), cada um para
-     um caminho lógico distinto, e mede:
+  1. dispara C uploads simultâneos (um ThreadPoolExecutor, C workers), cada um para um caminho lógico distinto, e mede:
        - wall_time           : tempo de parede até TODOS terminarem;
        - throughput_agregado : (C * tamanho) / wall_time   [MB/s do sistema todo];
        - latencia_media/p95  : distribuição do tempo POR requisição;
@@ -16,21 +12,10 @@ Para cada nível de concorrência C (ex.: 1, 2, 4, 8, 16) e cada tamanho de arqu
   2. baixa de volta os arquivos que subiram, também em C downloads simultâneos.
 
 Por que cada requisição cria o próprio cliente:
-  client.upload_file()/download_file() já são autocontidos — cada chamada abre o
-  próprio ControlClient + DataClient(ingress/egress) e fecha no fim. Logo, rodar
-  N em paralelo simula N clientes independentes de verdade (não há estado
-  compartilhado entre as chamadas).
+  client.upload_file()/download_file() já são autocontidos, cada chamada abre o próprio ControlClient + DataClient(ingress/egress) e fecha no fim.
+  Logo, rodar N em paralelo simula N clientes independentes de verdade (não há estado compartilhado entre as chamadas).
 
-IMPORTANTE (honestidade):
-  - Pode rodar de QUALQUER pasta: o script insere Final/DFS no sys.path sozinho
-    (mesma técnica do run_cli.py), então 'import dfs...' resolve sempre.
-  - O endereço do coordenador vem do config.py (não do --host/--port; esses métodos
-    de alto nível ignoram esses argumentos — mantidos só por paridade).
-  - Grava em benchmark/csv/resultados_concorrencia.csv (arquivo PRÓPRIO; NÃO alimenta o gráfico de
-    elasticidade do plot_metrics, que é o de variação de Nº DE NÓS).
-  - Eu não rodei isto contra um cluster real (não tenho Kafka/cluster aqui); validei
-    só a sintaxe. A prova é você rodar.
-
+- Grava em benchmark/csv/resultados_concorrencia.csv
 Uso:
   python benchmark/benchmark_concurrency.py
 """
@@ -47,21 +32,15 @@ import argparse
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- Bootstrap de path (mesma técnica do run_cli.py) -------------------------
-# Este script vive em Final/benchmark/, mas o pacote 'dfs' está em Final/DFS/.
-# Inserimos Final/DFS no sys.path para que 'import dfs...' resolva INDEPENDENTE
-# de onde você roda (da raiz Final/, de dentro de benchmark/, por caminho
-# absoluto, etc.). É a raiz do bug 'No module named DFS' da versão anterior:
-# o Python põe no path a pasta do SCRIPT (benchmark/), não a raiz do projeto.
+# Resolve o caminho do DFS para importar o cliente.
 _DFS_DIR = Path(__file__).resolve().parent.parent / "DFS"
 if str(_DFS_DIR) not in sys.path:
     sys.path.insert(0, str(_DFS_DIR))
-# -----------------------------------------------------------------------------
 
 from dfs.client import DataClient as DFSClient
 
-# Telemetria opcional (mesmo tópico do telemetry_hub). Import protegido: se faltar
-# o publisher ou o kafka-python, o benchmark roda igual, só sem alimentar o hub.
+# Telemetria opcional (mesmo tópico do telemetry_hub).
+# Import protegido: se faltar o publisher ou o kafka-python, o benchmark roda igual, só sem alimentar o hub.
 try:
     from dfs.cluster.kafka_publisher import ClusterEventPublisher
 except Exception:
@@ -72,9 +51,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# Pasta padrao de saida dos CSVs: Final/benchmark/csv/ (ancorada no SCRIPT, nao
-# no cwd) -> o CSV nunca cai na raiz do projeto, rode voce de onde rodar.
 _CSV_DIR = Path(__file__).resolve().parent / "csv"
 
 
@@ -148,8 +124,7 @@ def _percentil(valores, p: float) -> float:
 def _rodar_fase(tarefa, n_workers: int):
     """
     Dispara n_workers chamadas concorrentes de `tarefa(i)`.
-    `tarefa(i)` deve devolver (duracao_segundos, info) em caso de sucesso, ou
-    levantar exceção em caso de falha.
+    `tarefa(i)` deve devolver (duracao_segundos, info) em caso de sucesso, ou levantar exceção em caso de falha.
 
     Retorna: (wall_time, lista_de_duracoes, lista_de_infos_ok, n_erros)
     """
@@ -201,12 +176,10 @@ def run():
         out_path = _CSV_DIR / out_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Cliente compartilhado: os métodos de alto nível são autocontidos (cada chamada
-    # abre/fecha suas próprias conexões), então é seguro chamá-los de várias threads.
+    # Cliente compartilhado: os métodos de alto nível são autocontidos (cada chamada abre/fecha suas próprias conexões), então é seguro chamá-los de várias threads.
     client = DFSClient(args.host, args.port)
 
-    # Telemetria (opcional). Publicamos a partir da thread principal, DEPOIS de cada
-    # fase, para não depender de o publisher ser thread-safe.
+    # Telemetria (opcional). Publicamos a partir da thread principal, depois de cada fase, para não depender de o publisher ser thread-safe.
     metrics = None
     if not args.no_telemetria and ClusterEventPublisher is not None:
         try:
@@ -247,7 +220,7 @@ def run():
             # Caminhos lógicos distintos para esta rodada (um por cliente concorrente).
             remotos = [f"/conc/{run_id}/c{C}/u{i}_{size}MB.dat" for i in range(C)]
 
-            # ---------- FASE UPLOAD ----------
+            # FASE UPLOAD
             def tarefa_upload(i):
                 t0 = time.perf_counter()
                 client.upload_file(local_src, remotos[i])
@@ -273,7 +246,7 @@ def run():
             # Só baixa o que subiu de fato.
             remotos_ok = oks
 
-            # ---------- FASE DOWNLOAD ----------
+            # FASE DOWNLOAD
             def tarefa_download(i):
                 remoto = remotos_ok[i]
                 local_out = f"conc_dl_{run_id}_c{C}_{i}.dat"
