@@ -1,4 +1,7 @@
 protobuf
 grpcio
 grpcio-tools
-kafka-python
+kafka-python-ng
+pandas
+matplotlib
+seaborn

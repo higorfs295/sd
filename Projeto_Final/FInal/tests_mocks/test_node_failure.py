@@ -45,7 +45,8 @@ from pathlib import Path
 # ==============================================================================
 # CONFIGURAÇÃO
 # ==============================================================================
-ROOT_DIR = Path(__file__).resolve().parent                      # .../Final
+# Usa .parent.parent para subir de 'tests_mocks/' para a raiz real do projeto ('Final/')
+ROOT_DIR = Path(__file__).resolve().parent.parent
 METADATA_PATH = ROOT_DIR / "DFS" / "data" / "metadata" / "metadata_index.json"
 
 ORIGINAL = ROOT_DIR / "original.txt"
@@ -62,7 +63,6 @@ GET_CMD = [sys.executable, "run_cli.py", "get", CAMINHO_LOGICO, str(BAIXADO)]
 TIMEOUT_REREPLICACAO = 30
 POLL_INTERVALO = 1.0
 # ==============================================================================
-
 
 def md5(filepath: Path) -> str:
     h = hashlib.md5()

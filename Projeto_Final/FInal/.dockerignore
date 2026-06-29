@@ -5,3 +5,5 @@ __pycache__
 *.pyc
 data_docker
 .git
+data/
+DFS/data/
