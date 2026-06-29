@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import grpc
 
-from dfs.config import CHUNK_SIZE, STREAM_SIZE, REPLICATION_FACTOR
+from dfs.config import STREAM_SIZE, REPLICATION_FACTOR
 from dfs.cluster.control_client import ControlClient
 from dfs.cluster.replication_client import ReplicationClient
 from dfs.pb import dfs_pb2, dfs_pb2_grpc
@@ -38,6 +38,7 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
         buffer = bytearray()
         confirmados = []
         plano_por_indice = {}  # chunk_index -> [NodeRef]
+        tamanho_por_indice = {}  # chunk_index -> size_bytes (chunk adaptável)
 
         def carregar_plano():
             entrada = self.plans.get_upload(upload_id)
@@ -50,6 +51,9 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
             _total, chunks = entrada
             for cp in chunks:
                 plano_por_indice[cp.chunk_index] = list(cp.replicas)
+                tamanho_por_indice[cp.chunk_index] = (
+                    cp.size_bytes
+                )  # tamanho deste chunk
 
         def replicas_do(idx):
             reps = plano_por_indice.get(idx)
@@ -86,10 +90,15 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
             if msg.data:
                 buffer.extend(msg.data)
                 total_bytes += len(msg.data)
-                while len(buffer) >= CHUNK_SIZE:
-                    fechar_chunk(chunk_index, bytes(buffer[:CHUNK_SIZE]))
-                    del buffer[:CHUNK_SIZE]
+
+                # Fatia usando o tamanho planejado para este chunk (chunk adaptável).
+                # O tamanho vem do plano (size_bytes de cada ChunkPlacement).
+                tam = tamanho_por_indice.get(chunk_index)
+                while tam is not None and len(buffer) >= tam:
+                    fechar_chunk(chunk_index, bytes(buffer[:tam]))
+                    del buffer[:tam]
                     chunk_index += 1
+                    tam = tamanho_por_indice.get(chunk_index)
         if upload_id is None:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "upload sem upload_id")
         if (

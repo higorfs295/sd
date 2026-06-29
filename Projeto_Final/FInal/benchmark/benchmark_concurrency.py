@@ -33,7 +33,6 @@ IMPORTANTE (honestidade):
 
 Uso:
   python benchmark/benchmark_concurrency.py
-  python benchmark/benchmark_concurrency.py --size 5 --concorrencia 1 2 4 8 16 --nodes 5
 """
 
 import os
@@ -68,7 +67,9 @@ try:
 except Exception:
     ClusterEventPublisher = None
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -78,16 +79,46 @@ _CSV_DIR = Path(__file__).resolve().parent / "csv"
 
 
 def parse_arguments():
-    p = argparse.ArgumentParser(description="DFS - Benchmark de concorrência (taxa de requisições)")
-    p.add_argument("--host", type=str, default="localhost", help="(ignorado pelos métodos de alto nível; vem do config)")
-    p.add_argument("--port", type=int, default=50051, help="(ignorado pelos métodos de alto nível; vem do config)")
-    p.add_argument("--size", type=int, default=5, help="Tamanho de cada arquivo, em MB (fixo, para isolar o efeito da taxa)")
-    p.add_argument("--concorrencia", type=int, nargs="+", default=[1, 2, 4, 8, 16],
-                   help="Níveis de concorrência a testar (clientes simultâneos)")
-    p.add_argument("--nodes", type=int, default=5, help="Nº de nós ativos (apenas rótulo no CSV)")
-    p.add_argument("--output", type=str, default="resultados_concorrencia.csv",
-                   help="Nome do CSV (gravado em benchmark/csv/) ou um caminho absoluto")
-    p.add_argument("--no-telemetria", action="store_true", help="Não publica métricas no Kafka")
+    p = argparse.ArgumentParser(
+        description="DFS - Benchmark de concorrência (taxa de requisições)"
+    )
+    p.add_argument(
+        "--host",
+        type=str,
+        default="localhost",
+        help="(ignorado pelos métodos de alto nível; vem do config)",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=50051,
+        help="(ignorado pelos métodos de alto nível; vem do config)",
+    )
+    p.add_argument(
+        "--size",
+        type=int,
+        default=5,
+        help="Tamanho de cada arquivo, em MB (fixo, para isolar o efeito da taxa)",
+    )
+    p.add_argument(
+        "--concorrencia",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8, 16],
+        help="Níveis de concorrência a testar (clientes simultâneos)",
+    )
+    p.add_argument(
+        "--nodes", type=int, default=5, help="Nº de nós ativos (apenas rótulo no CSV)"
+    )
+    p.add_argument(
+        "--output",
+        type=str,
+        default="resultados_concorrencia.csv",
+        help="Nome do CSV (gravado em benchmark/csv/) ou um caminho absoluto",
+    )
+    p.add_argument(
+        "--no-telemetria", action="store_true", help="Não publica métricas no Kafka"
+    )
     return p.parse_args()
 
 
@@ -186,9 +217,18 @@ def run():
             metrics = None
 
     # Cabeçalho do CSV (só se o arquivo ainda não existir; senão faz append).
-    campos = ["operacao", "concorrencia", "tamanho_mb", "wall_time_s",
-              "throughput_agregado_mbs", "latencia_media_s", "latencia_p95_s",
-              "req_por_s", "nos_ativos", "erros"]
+    campos = [
+        "operacao",
+        "concorrencia",
+        "tamanho_mb",
+        "wall_time_s",
+        "throughput_agregado_mbs",
+        "latencia_media_s",
+        "latencia_p95_s",
+        "req_por_s",
+        "nos_ativos",
+        "erros",
+    ]
     if not out_path.exists():
         with open(out_path, "w", newline="") as f:
             csv.DictWriter(f, fieldnames=campos).writeheader()
@@ -200,7 +240,9 @@ def run():
 
     try:
         for C in args.concorrencia:
-            logger.info(f"=== Concorrência C={C} | tamanho={size}MB | nós(rótulo)={args.nodes} ===")
+            logger.info(
+                f"=== Concorrência C={C} | tamanho={size}MB | nós(rótulo)={args.nodes} ==="
+            )
 
             # Caminhos lógicos distintos para esta rodada (um por cliente concorrente).
             remotos = [f"/conc/{run_id}/c{C}/u{i}_{size}MB.dat" for i in range(C)]
@@ -212,15 +254,21 @@ def run():
                 return time.perf_counter() - t0, remotos[i]
 
             wall, durs, oks, erros = _rodar_fase(tarefa_upload, C)
-            linha = _linha_metricas("upload", C, size, wall, durs, len(oks), erros, args.nodes)
+            linha = _linha_metricas(
+                "upload", C, size, wall, durs, len(oks), erros, args.nodes
+            )
             with open(out_path, "a", newline="") as f:
                 csv.DictWriter(f, fieldnames=campos).writerow(linha)
-            logger.info(f"UPLOAD   C={C}: {linha['throughput_agregado_mbs']} MB/s agg | "
-                        f"lat_media {linha['latencia_media_s']}s | p95 {linha['latencia_p95_s']}s | "
-                        f"{linha['req_por_s']} req/s | erros={erros}")
+            logger.info(
+                f"UPLOAD   C={C}: {linha['throughput_agregado_mbs']} MB/s agg | "
+                f"lat_media {linha['latencia_media_s']}s | p95 {linha['latencia_p95_s']}s | "
+                f"{linha['req_por_s']} req/s | erros={erros}"
+            )
             if metrics:
                 for d in durs:
-                    metrics.publish_metric("upload", d, extra={"concorrencia": C, "tamanho_mb": size})
+                    metrics.publish_metric(
+                        "upload", d, extra={"concorrencia": C, "tamanho_mb": size}
+                    )
 
             # Só baixa o que subiu de fato.
             remotos_ok = oks
@@ -234,17 +282,25 @@ def run():
                 return time.perf_counter() - t0, local_out
 
             if remotos_ok:
-                wall, durs, oks_dl, erros = _rodar_fase(tarefa_download, len(remotos_ok))
+                wall, durs, oks_dl, erros = _rodar_fase(
+                    tarefa_download, len(remotos_ok)
+                )
                 baixados.extend(oks_dl)
-                linha = _linha_metricas("download", C, size, wall, durs, len(oks_dl), erros, args.nodes)
+                linha = _linha_metricas(
+                    "download", C, size, wall, durs, len(oks_dl), erros, args.nodes
+                )
                 with open(out_path, "a", newline="") as f:
                     csv.DictWriter(f, fieldnames=campos).writerow(linha)
-                logger.info(f"DOWNLOAD C={C}: {linha['throughput_agregado_mbs']} MB/s agg | "
-                            f"lat_media {linha['latencia_media_s']}s | p95 {linha['latencia_p95_s']}s | "
-                            f"{linha['req_por_s']} req/s | erros={erros}")
+                logger.info(
+                    f"DOWNLOAD C={C}: {linha['throughput_agregado_mbs']} MB/s agg | "
+                    f"lat_media {linha['latencia_media_s']}s | p95 {linha['latencia_p95_s']}s | "
+                    f"{linha['req_por_s']} req/s | erros={erros}"
+                )
                 if metrics:
                     for d in durs:
-                        metrics.publish_metric("download", d, extra={"concorrencia": C, "tamanho_mb": size})
+                        metrics.publish_metric(
+                            "download", d, extra={"concorrencia": C, "tamanho_mb": size}
+                        )
     finally:
         # Limpeza dos artefatos locais.
         if os.path.exists(local_src):
