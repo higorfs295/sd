@@ -5,12 +5,12 @@ import hashlib
 from pathlib import Path
 import docker  # <--- Integração com o Docker Engine
 
-# --- Injeção do Path real do seu projeto ---
+# --- Injeção do Path real do seu projeto    ---
 _DFS_DIR = Path(__file__).resolve().parent.parent / "DFS"
 if str(_DFS_DIR) not in sys.path:
     sys.path.insert(0, str(_DFS_DIR))
 
-# Importando o seu cliente real
+# Importando o seu client real
 from dfs.client import DataClient as DFSClient
 
 # Configuração Base (Como roda DENTRO do coordenador, apontamos para o localhost/127.0.0.1)

@@ -9,7 +9,7 @@ class ClusterEventPublisher:
     """
     Publica eventos no Kafka. Tem dois usos hoje:
 
-      1. COMANDOS DE RE-REPLICAÇÃO (crítico):
+      1. COMANDOS DE RE-REPLICAÇÃO (crit):
          `publish_storage_command(...)` envia ordens REPLICATE_CHUNK ao tópico
          do Storage Node fonte. Se isso falhar, a re-replicação não acontece,
          então aqui o erro é PROPAGADO (o watcher tenta de novo no próximo ciclo).

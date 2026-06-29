@@ -4,6 +4,7 @@ env
 __pycache__
 *.pyc
 data_docker
+data_docker
 .git
 data/
 DFS/data/

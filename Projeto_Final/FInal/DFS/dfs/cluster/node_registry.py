@@ -16,7 +16,7 @@ Tem DUAS responsabilidades, separadas de propósito:
 Por que separar canônica de vivos:
 
 1. PLACEMENT (decidir onde gravar um chunk novo): usa a canônica.
-   - Inclui nós temporariamente DOWN.
+   - Inclui nós temporariamente down
     Por quê? Porque um nó pode estar em manutenção rápida (reiniciando) e ainda deve receber sua cota de chunks.
     O sistema decide o placement, a re-replicação eventual entrega os bytes quando o nó voltar.
 

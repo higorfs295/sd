@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 def audit_sharding_statistics():
+    
     print("\n=======================================================")
     print("⚖️ AUDITORIA DE BALANCEAMENTO DE DADOS (SHARDING) ⚖️")
     print("=======================================================\n")

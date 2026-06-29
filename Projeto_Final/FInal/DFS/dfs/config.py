@@ -10,7 +10,7 @@ import os
 # Isso evita caminhos fixos e deixa o projeto mais portátil entre sistemas operacionais
 BASE_DIR = Path(__file__).resolve().parents[1]
 
-# Endereço e porta do coordenador
+# Endereço e porta  do coordenador
 # O coordenador é o ponto de entrada do sistema distribuído
 HOST = os.getenv("COORDINATOR_HOST", "127.0.0.1")
 PORT = 9100

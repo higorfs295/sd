@@ -49,7 +49,7 @@ def main():
     plt.savefig(GRAFICOS_DIR / '02_latencia_vs_tamanho.png', dpi=300)
     plt.close()
 
-    # 3. Gráfico de Elasticidade: Latência vs Número de Nós
+    # 3. Gráfico de Elasticidade: Latência vs Nº de Nós
     # NOME DA COLUNA CORRIGIDO: nos_ativos
     if df['nos_ativos'].nunique() > 1:
         plt.figure(figsize=(10, 6))

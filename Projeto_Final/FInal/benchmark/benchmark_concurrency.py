@@ -13,7 +13,8 @@ Para cada nível de concorrência C (ex.: 1, 2, 4, 8, 16) e cada tamanho de arqu
        - latencia_media/p95  : distribuição do tempo POR requisição;
        - req_por_s           : C / wall_time;
        - erros               : requisições que falharam.
-  2. baixa de volta os arquivos que subiram, também em C downloads simultâneos.
+ 
+   2. baixa de volta os arquivos que subiram, também em C downloads simultâneos.
 
 Por que cada requisição cria o próprio cliente:
   client.upload_file()/download_file() já são autocontidos — cada chamada abre o

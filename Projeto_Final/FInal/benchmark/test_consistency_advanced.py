@@ -19,7 +19,7 @@ COORD_PORT = 9100  # Porta do seu coordenador
 def gerar_conteudo_local(versao):
     filename = f"local_v{versao}.dat"
     with open(filename, "wb") as f:
-        # Cria arquivos levemente diferentes
+        # Cria arq levemente diferentes
         conteudo = (f"CONTEUDO VERSAO {versao} ".encode() * (1024 * 50)) # ~1MB
         f.write(conteudo)
     return filename, hashlib.md5(conteudo).hexdigest()

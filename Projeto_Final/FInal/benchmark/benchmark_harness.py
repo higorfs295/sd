@@ -12,7 +12,7 @@ from pathlib import Path
 # Este script vive em Final/benchmark/, mas o pacote 'dfs' está em Final/DFS/.
 # Inserimos Final/DFS no sys.path para que 'import dfs...' resolva INDEPENDENTE
 # de onde você roda (da raiz Final/, de dentro de benchmark/, por caminho
-# absoluto, etc.). Sem isto, rodar de dentro de benchmark/ dá
+# absoluto, etc.). S isto, rodar de dentro de benchmark/ dá
 # 'ModuleNotFoundError: No module named DFS', porque o Python põe no path a
 # pasta do SCRIPT, não a raiz do projeto.
 _DFS_DIR = Path(__file__).resolve().parent.parent / "DFS"

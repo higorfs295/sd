@@ -54,7 +54,7 @@ class DataClient:
 
         A CLI (dfs/interface/cli.py) chama este método num bloco `finally` após
         cada operação PUT/GET. Sem ele, a CLI estourava
-        'DataClient' object has no attribute 'close' DEPOIS de já ter enviado os
+        'DataClient'  object has no attribute 'close' DEPOIS de já ter enviado os
         bytes (o erro era só na limpeza do canal, não no upload em si).
         """
         self.channel.close()

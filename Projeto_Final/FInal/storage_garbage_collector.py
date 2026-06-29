@@ -40,7 +40,7 @@ STORAGE_BASE_DIR = ROOT_DIR / "DFS" / "data"
 NODES = ["node1", "node2", "node3", "node4", "node5"]
 
 CLEAN_INTERVAL = 10.0      # Tempo entre as varreduras do disco (segundos)
-FILE_AGE_THRESHOLD = 60.0  # Tempo mínimo sem modificação para ser "morto" (segundos)
+FILE_AGE_THRESHOLD = 60.0  # Tempo mínimo s modificação para ser "morto" (segundos)
 # --------------------
 
 

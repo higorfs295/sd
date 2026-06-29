@@ -14,5 +14,5 @@ COPY . .
 # =========================================================
 ENV PYTHONPATH="/app/DFS:/app"
 
-# (O CMD do docker-compose vai sobrescrever este na hora de rodar os nós)
+# (O CMD do docker-compose vai sobrescrever  este na hora de rodar os nós)
 CMD ["python", "-m", "dfs.interface.cli"]

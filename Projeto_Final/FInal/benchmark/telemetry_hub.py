@@ -16,7 +16,7 @@ import json
 from kafka import KafkaConsumer
 
 # --- CONFIGURAÇÃO DE ALTA DISPONIBILIDADE ---
-# Aponta para a lista de brokers do cluster. Se o primeiro cair, ele tenta o segundo.
+# Aponta para a lista de brokers do cluster . Se o primeiro cair, ele tenta o segundo.
 KAFKA_BROKERS = ["127.0.0.1:9092", "127.0.0.1:9093"]
 TOPIC_METRICS = "cluster-metrics"
 # --------------------------------------------

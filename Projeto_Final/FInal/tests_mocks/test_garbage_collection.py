@@ -32,6 +32,7 @@ from pathlib import Path
 from dfs.storage.local_storage import LocalStorage
 
 
+
 def aplicar_chunks_to_delete(storage: LocalStorage, chunks_to_delete: list[str]) -> int:
     """
     Reproduz EXATAMENTE o que o nó deve fazer ao receber chunks_to_delete:

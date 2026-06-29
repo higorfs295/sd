@@ -6,7 +6,6 @@ Prova, em memória, que a adição dinâmica funciona:
 - o placement de uploads FUTUROS passa a distribuir para o node6.
 NÃO sobe processos nem Kafka: testa só a lógica do plano de controle.
 """
-
 from dfs.cluster.node_registry import NodeRegistry
 from dfs.cluster import placement
 from dfs.config import REPLICATION_FACTOR

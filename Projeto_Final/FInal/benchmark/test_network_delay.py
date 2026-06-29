@@ -9,7 +9,7 @@ import sys
 
 # SE FOR SIMULAR DELAY NA REDE RODE OS COMANDOS ABAIXO EM ORDEM
 # 
-# export NETWORK_DELAY=1.5
+# export NETWORK_DELAY = 1.5
 # python run_cluster.py
 # python test_network_delay.py
 

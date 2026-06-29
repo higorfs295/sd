@@ -58,6 +58,7 @@ FILE_SIZE_MB = 5
 PUT_CMD = [sys.executable, "run_cli.py", "put", str(ORIGINAL), CAMINHO_LOGICO]
 GET_CMD = [sys.executable, "run_cli.py", "get", CAMINHO_LOGICO, str(BAIXADO)]
 
+
 # Quanto esperar pela re-replicação. Detecção da morte ~ HEARTBEAT_DEAD(8s) +
 # WATCHER_INTERVAL(2s) ≈ 10s; somamos o round-trip Kafka + cópia do chunk.
 TIMEOUT_REREPLICACAO = 30

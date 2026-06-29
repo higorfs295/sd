@@ -8,7 +8,7 @@ API orientada a chunk_id usada pelo plano de dados do Marco 3.
 CONVENÇÃO DE NOME DO CHUNK (importante p/ o observer):
   O chunk_id vem no formato "<upload_id>_chunk_<indice>" (sugestão do .proto).
   Gravamos o arquivo do chunk com ESSE nome, SEM extensão, em
-  <root>/chunks/<chunk_id>. Assim o nome termina em "_chunk_<N>" e casa com o
+  <root>/chunks/ <chunk_id>. Assim o nome termina em "_chunk_<N>" e casa com o
   regex do observer (_chunk_\\d+$). Se algum dia quiser usar extensão (.bin),
   ajuste o REGEX_CHUNK do observer junto.
 """
