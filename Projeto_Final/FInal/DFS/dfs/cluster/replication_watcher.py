@@ -30,10 +30,11 @@ from dfs.pb import dfs_pb2
 def _pub_default(event: dict) -> None:
     """
     Publisher default para teste ISOLADO do plano de controle (sem Kafka).
-    Apenas imprime o pedido. Em produção, implementa uma saída que publica o evento no tópico Kafka 'node-dead'.
+    Apenas imprime o pedido. Em produção, o publisher real é o
+    KafkaRereplicationPublisher, que traduz cada chunk perdido em um comando
+    REPLICATE_CHUNK no tópico 'storage-node-{no_fonte}-commands'.
     """
     print(f"[watcher] Pedido de re-replicação produzido: {event}")
-
 
 class ReplicationWatcher:
     def __init__(
