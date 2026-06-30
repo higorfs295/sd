@@ -37,9 +37,38 @@ class HeartbeatWorker:
     def _loop(self) -> None:
         # Garante que tens a biblioteca os importada (podes colocar no topo do ficheiro)
         import os
+        import csv
+        from pathlib import Path
+
+        # Log de instrumentação: caminho do CSV (uma linha por batimento real).
+        raiz_final = Path(__file__).resolve().parent.parent.parent.parent
+        log_path = (
+            raiz_final / "benchmark" / "csv" / f"heartbeat_real_{self.node.node_id}.csv"
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        novo = not log_path.exists()
+        if novo:
+            with open(log_path, "w", newline="") as f:
+                csv.writer(f).writerow(
+                    ["node_id", "timestamp_monotonic", "intervalo_real_s"]
+                )
+
+        anterior = time.monotonic()
 
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
+            agora = time.monotonic()
+            intervalo_real = agora - anterior  # ESTE é o dado que importa
+            anterior = agora
+
+            # Grava o intervalo real ANTES de chamar o coordenador, para o log
+            # capturar o atraso mesmo se o heartbeat() em si falhar.
+            with open(log_path, "a", newline="") as f:
+                csv.writer(f).writerow(
+                    [self.node.node_id, agora, round(intervalo_real, 4)]
+                )
+
             try:
                 # 1. Guarda a resposta do Coordenador numa variável
                 resposta = self.client.heartbeat(
@@ -47,7 +76,7 @@ class HeartbeatWorker:
                     shutil.disk_usage(self.node.storage_dir).free,
                     0,
                     0,
-                    self.storage.list_chunk_ids(),  # Atenção: usa o método que já tens aí no teu código original
+                    self.storage.list_chunk_ids(),
                 )
                 # print(f"[{self.node.node_id}] heartbeat OK")  # linha de depuração
 

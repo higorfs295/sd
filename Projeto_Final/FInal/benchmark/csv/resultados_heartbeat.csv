@@ -1,0 +1,3 @@
+fase,amostras,media_s,max_s,p95_s,p99_s
+ocioso,15,2.0005,2.0007,2.0007,2.0007
+sob_carga,15,2.0004,2.0009,2.0007,2.0009

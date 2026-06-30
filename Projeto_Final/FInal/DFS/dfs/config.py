@@ -107,9 +107,9 @@ Os tempos abaixo são múltiplos do intervalo de heartbeat: toleram algumas perd
 HEARTBEAT_INTERVAL = 2
 
 # Silêncio (sem heartbeat) a partir do qual o nó é reclassificado:
-#  - entre SUSPECT e DEAD: SUSPECT (atrasado; ~4 batimentos perdidos)
+#  - entre SUSPECT e DEAD: SUSPECT (atrasado; ~2,5 batimentos perdidos)
 #  - >= DEAD: DEAD (considerado fora do ar; ~10 batimentos perdidos)
-HEARTBEAT_SUSPECT = 8
+HEARTBEAT_SUSPECT = 5
 HEARTBEAT_DEAD = 20
 
 # Quantidade de réplicas de cada chunk.

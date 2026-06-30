@@ -11,6 +11,8 @@ import seaborn as sns
 _HERE = Path(__file__).resolve().parent
 CSV_VOLUME = _HERE / "csv" / "resultados_volume.csv"
 CSV_CONCORRENCIA = _HERE / "csv" / "resultados_concorrencia.csv"
+CSV_HEARTBEAT = _HERE / "csv" / "resultados_heartbeat.csv"
+CSV_HEARTBEAT_VARREDURA = _HERE / "csv" / "resultados_heartbeat_varredura.csv"
 GRAFICOS_DIR = _HERE / "graficos"
 
 # Configuração visual profissional
@@ -191,6 +193,59 @@ def plotar_concorrencia(df):
     plt.close()
 
 
+def plotar_heartbeat_distribuicao(df):
+    """
+    Gráfico do benchmark de heartbeat, MODO 1 (distribuição ocioso vs sob carga).
+    Espera as colunas: fase ('ocioso'/'sob_carga'), media_s, max_s, p95_s, p99_s.
+    """
+    # 7. Distribuição do atraso de batimento: ocioso vs sob carga.
+    # Mostra a estatística-chave (média, p95, p99, máximo) lado a lado.
+    # "Derrete" as colunas de estatística para uma forma longa, para o seaborn
+    # desenhar barras agrupadas por fase.
+    estat = ["media_s", "p95_s", "p99_s", "max_s"]
+    rotulo = {"media_s": "média", "p95_s": "p95", "p99_s": "p99", "max_s": "máximo"}
+    longo = df.melt(
+        id_vars=["fase"],
+        value_vars=estat,
+        var_name="estatistica",
+        value_name="segundos",
+    )
+    longo["estatistica"] = longo["estatistica"].map(rotulo)
+
+    plt.figure(figsize=(10, 6))
+    ax = sns.barplot(data=longo, x="estatistica", y="segundos", hue="fase")
+    _rotular_barras(ax, fmt="{:.2f}")
+    plt.title("Atraso Entre Batimentos: Ocioso vs Sob Carga", fontsize=14)
+    plt.xlabel("Estatística do intervalo entre batimentos", fontsize=12)
+    plt.ylabel("Segundos", fontsize=12)
+    plt.legend(title="Condição")
+    plt.tight_layout()
+    plt.savefig(GRAFICOS_DIR / "07_heartbeat_ocioso_vs_carga.png", dpi=300)
+    plt.close()
+
+
+def plotar_heartbeat_varredura(df):
+    """
+    Gráfico do benchmark de heartbeat, MODO 2 (varredura de limiar DEAD).
+    Espera as colunas: fase, dead_testado, falsos_positivos.
+    """
+    # 8. Varredura de limiar DEAD.
+    # Mostra, para cada DEAD testado sob carga, quantos falsos positivos ocorreram.
+    # O melhor DEAD é o menor que ainda dá zero falso positivo.
+    sweep = df[df["fase"] == "sob_carga"].sort_values("dead_testado")
+    plt.figure(figsize=(10, 6))
+    ax = sns.barplot(
+        data=sweep, x="dead_testado", y="falsos_positivos", color="#c44e52"
+    )
+    _rotular_barras(ax, fmt="{:.0f}")
+    plt.title("Falsos Positivos de Morte por Limiar DEAD (sob carga)", fontsize=14)
+    plt.xlabel("Limiar DEAD testado (segundos)", fontsize=12)
+    plt.ylabel("Falsos positivos (nós marcados mortos por engano)", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(GRAFICOS_DIR / "08_heartbeat_varredura_dead.png", dpi=300)
+    plt.close()
+
+
 def main():
     GRAFICOS_DIR.mkdir(parents=True, exist_ok=True)
     algo_gerado = False
@@ -211,6 +266,26 @@ def main():
     else:
         print(
             f"Aviso: '{CSV_CONCORRENCIA}' não encontrado. Rode o benchmark de concorrência primeiro."
+        )
+
+    # Benchmark de heartbeat, MODO 1 (resultados_heartbeat.csv)
+    if CSV_HEARTBEAT.exists():
+        plotar_heartbeat_distribuicao(pd.read_csv(CSV_HEARTBEAT))
+        algo_gerado = True
+    else:
+        print(
+            f"Aviso: '{CSV_HEARTBEAT}' não encontrado. "
+            f"Rode o benchmark de heartbeat (modo padrão) primeiro."
+        )
+
+    # Benchmark de heartbeat, MODO 2 (resultados_heartbeat_varredura.csv)
+    if CSV_HEARTBEAT_VARREDURA.exists():
+        plotar_heartbeat_varredura(pd.read_csv(CSV_HEARTBEAT_VARREDURA))
+        algo_gerado = True
+    else:
+        print(
+            f"Aviso: '{CSV_HEARTBEAT_VARREDURA}' não encontrado. "
+            f"Rode o benchmark de heartbeat com --varredura primeiro."
         )
 
     if algo_gerado:
