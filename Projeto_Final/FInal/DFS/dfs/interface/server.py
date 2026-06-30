@@ -160,8 +160,8 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         O coordenador armazena isso via NodeRegistry.register_node() que também marca este momento como o "primeiro batimento",
         para o nó já entrar como ALIVE imediatamente após registrar.
 
-        Retornamos parâmetros do cluster (REPLICATION_FACTOR, CHUNK_SIZE, intervalo de heartbeat) para que TODOS os nós usem os mesmos valores,
-        o que evita inconsistências, como um nó estabelecer localmente um intervalo de heartbeat diferente do config.py.
+        Retornamos parâmetros do cluster (REPLICATION_FACTOR, intervalo de heartbeat) para que todos os nós usem os mesmos valores.
+        O tamanho de chunk não entra aqui porque é adaptável, decidido por arquivo no RequestUpload.
         """
         # Lógica do registry.
         self.registry.register_node(
@@ -177,7 +177,6 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             message=f"Nó {request.node.node_id} registrado",
             cluster_node_count=self.registry.size(),
             replication_factor=REPLICATION_FACTOR,
-            chunk_size_bytes=CHUNK_SIZE,
             heartbeat_interval_secs=HEARTBEAT_INTERVAL,
         )
 

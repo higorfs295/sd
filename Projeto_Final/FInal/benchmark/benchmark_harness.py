@@ -1,3 +1,28 @@
+"""
+Benchmark de Volume (variação do tamanho de arquivo, em série)
+Complementa o benchmark_concurrency.py (que mede a taxa de requisições, em paralelo) medindo o desempenho bruto do sistema com UM cliente por vez, à medida que o tamanho do arquivo cresce.
+
+Para cada tamanho de arquivo (ex.: 1, 5, 10, 25, 50 MB) e cada iteração:
+  1. faz UM upload do arquivo para um caminho lógico, em série, e mede:
+       - tempo_segundos   : tempo de parede do upload;
+       - throughput_mbs   : tamanho / tempo   [MB/s de um único cliente].
+  2. faz UM download do mesmo arquivo, em série, e mede tempo e throughput.
+  Várias iterações por tamanho permitem observar a média e a variância.
+
+Por que rodar em série (um de cada vez):
+  O objetivo aqui é medir o desempenho BASE do sistema, sem contenção entre requisições concorrentes.
+  Isola o efeito do tamanho do arquivo no tempo e na vazão.
+  A medição sob carga concorrente (vários clientes ao mesmo tempo) é responsabilidade do benchmark_concurrency.py.
+
+O que esperar dos resultados:
+  o download tende a ser mais rápido que o upload, porque o upload paga a replicação síncrona (grava várias cópias e espera o quórum), enquanto o download lê de uma única réplica.
+  a variância tende a crescer com o tamanho do arquivo, por causa da contenção de recursos no ambiente de máquina única (vários processos disputam CPU e disco).
+
+- Grava em benchmark/csv/resultados_volume.csv
+Uso:
+  python benchmark/benchmark_volume.py
+"""
+
 import os
 import sys
 import time
@@ -28,11 +53,11 @@ def parse_arguments():
     parser.add_argument(
         "--host", type=str, default="localhost", help="Coordenador Host"
     )
-    parser.add_argument("--port", type=int, default=50051, help="Coordenador Port")
+    parser.add_argument("--port", type=int, default=9100, help="Coordenador Port")
     parser.add_argument(
         "--output",
         type=str,
-        default="resultados_benchmark.csv",
+        default="resultados_volume.csv",
         help="Nome do CSV (gravado em benchmark/csv/) ou um caminho absoluto",
     )
     parser.add_argument(
