@@ -18,10 +18,10 @@ from dfs.cluster.node_registry import NodeRegistry
 from dfs.config import (
     COORDINATOR_HOST,
     COORDINATOR_PORT,
-    CHUNK_SIZE,
     HEARTBEAT_INTERVAL,
     REPLICATION_FACTOR,
 )
+from dfs.cluster.chunking import escolher_chunk_size
 from dfs.pb import dfs_pb2, dfs_pb2_grpc
 from dfs.cluster import placement
 from dfs.cluster import replication_client
@@ -34,7 +34,7 @@ def _upload_id_from_chunk_id(chunk_id: str) -> str | None:
     Extrai o upload_id de um chunk_id no formato '<upload_id>_chunk_<índice>'.
 
     ACOPLAMENTO DE NOMENCLATURA: depende dessa convenção de nomenclatura (definida no RequestUpload).
-    Se o formato do chunk_id mudar (ex.: passar a ser hash de conteúdo), APENAS este ponto precisa de ajuste, pois a lógica de limpeza de órfãos não conhece o formato e não muda.
+    Se o formato do chunk_id mudar (ex.: passar a ser hash de conteúdo), Apenas este ponto precisa de ajuste, pois a lógica de limpeza de órfãos não conhece o formato e não muda.
     """
     marcador = "_chunk_"
 
@@ -160,8 +160,8 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         O coordenador armazena isso via NodeRegistry.register_node() que também marca este momento como o "primeiro batimento",
         para o nó já entrar como ALIVE imediatamente após registrar.
 
-        Retornamos parâmetros do cluster (REPLICATION_FACTOR, CHUNK_SIZE, intervalo de heartbeat) para que TODOS os nós usem os mesmos valores,
-        o que evita inconsistências, como um nó estabelecer localmente um intervalo de heartbeat diferente do config.py.
+        Retornamos parâmetros do cluster (REPLICATION_FACTOR, intervalo de heartbeat) para que todos os nós usem os mesmos valores.
+        O tamanho de chunk não entra aqui porque é adaptável, decidido por arquivo no RequestUpload.
         """
         # Lógica do registry.
         self.registry.register_node(
@@ -177,7 +177,6 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
             message=f"Nó {request.node.node_id} registrado",
             cluster_node_count=self.registry.size(),
             replication_factor=REPLICATION_FACTOR,
-            chunk_size_bytes=CHUNK_SIZE,
             heartbeat_interval_secs=HEARTBEAT_INTERVAL,
         )
 
@@ -336,10 +335,14 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         # Necessário agora que a membership pode crescer em runtime (RegisterNode de um nó novo): se lêssemos os dois separados, um registro concorrente poderia entrar no meio e fazer len(lista) != tamanho, estourando a blindagem do placement.
         nos_canonicos, tamanho_cluster = self.registry.canonical_snapshot()
 
+        # Chunk adaptável: tamanho do chunk em função do tamanho do arquivo e do número de nós (ver chunking.py).
+        # Decidido uma vez aqui, nunca recalculado.
+        chunk_size = escolher_chunk_size(request.total_size_bytes, tamanho_cluster)
+
         # Quantos chunks este arquivo vai gerar.
-        # math.ceil garante que o último pedaço (possivelmente menor que CHUNK_SIZE) também vire um chunk
-        # Sem ceil, um arquivo de exatamente N*CHUNK_SIZE bytes seria o único caso correto. Qualquer outro perderia o último fragmento.
-        total_chunks = max(1, math.ceil(request.total_size_bytes / CHUNK_SIZE))
+        # math.ceil garante que o último pedaço (possivelmente menor que chunk_size) também vire um chunk
+        # Sem ceil, um arquivo de exatamente N*chunk_size bytes seria o único caso correto. Qualquer outro perderia o último fragmento.
+        total_chunks = max(1, math.ceil(request.total_size_bytes / chunk_size))
 
         # Identificador único deste upload. Usado para amarrar as três mensagens:
         # RequestUpload, UploadFile (stream), ConfirmUpload.
@@ -349,11 +352,11 @@ class ControlServiceServicer(dfs_pb2_grpc.ControlServiceServicer):
         placements = []
         for chunk_index in range(total_chunks):
             # Tamanho efetivo deste chunk.
-            # Os chunks têm tamanho CHUNK_SIZE. O último pode ser menor (resto da divisão).
+            # Os chunks têm tamanho chunk_size. O último pode ser menor (resto da divisão).
             bytes_antes = (
-                chunk_index * CHUNK_SIZE
+                chunk_index * chunk_size
             )  # quantos bytes já foram alocados para os chunks anteriores
-            tamanho_chunk = min(CHUNK_SIZE, request.total_size_bytes - bytes_antes)
+            tamanho_chunk = min(chunk_size, request.total_size_bytes - bytes_antes)
 
             # ID estável do chunk: combina upload_id + índice ordinal.
             # Estável = o mesmo arquivo enviado duas vezes gera IDs diferentes

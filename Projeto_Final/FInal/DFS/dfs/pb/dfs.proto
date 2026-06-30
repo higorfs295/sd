@@ -1,15 +1,12 @@
-// =============================================================================
-// dfs.proto — Contrato de Comunicação do Sistema de Arquivos Distribuído
-// =============================================================================
+// dfs.proto - Contrato de Comunicação do Sistema de Arquivos Distribuído
 //
-// Este arquivo é a ÚNICA fonte de verdade sobre os formatos de mensagens e
-// as assinaturas das RPCs trocadas no cluster. O código Python correspondente
-// (dfs_pb2.py e dfs_pb2_grpc.py) é gerado automaticamente pelo compilador
-// `grpc_tools.protoc`. Nunca edite os arquivos gerados — sempre edite ESTE.
+// Este arquivo é a fonte de verdade sobre os formatos de mensagens e as assinaturas das RPCs trocadas no cluster.
+// O código Python correspondente (dfs_pb2.py e dfs_pb2_grpc.py) é gerado automaticamente pelo compilador `grpc_tools.protoc`.
+// Nunca edite os arquivos gerados, sempre edite este.
 //
 // -----------------------------------------------------------------------------
-// ARQUITETURA DE REFERÊNCIA
-// -----------------------------------------------------------------------------
+//
+// ARQUITETURA DE REFERÊNCIA:
 //
 // Topologia:
 //   - 1 coordenador (centraliza CONTROLE; nunca toca em bytes de arquivos)
@@ -18,12 +15,10 @@
 //
 // Fator de replicação: R = 3
 //
-// Estratégia de placement (round-robin determinístico por índice de chunk,
-// com N = 5 nós):
+// Estratégia de placement (round-robin determinístico por índice de chunk, com N = 5 nós):
 //   chunk i tem réplicas em [N((i+0) % 5), N((i+1) % 5), N((i+2) % 5)]
-// O ingress de um arquivo é escolhido por round-robin entre arquivos (função ingress_for_file em dfs/cluster/placement.py),
-// garantindo distribuição da carga de uploads entre os nós ao longo do tempo.
-// O ingress NÃO é necessariamente a primeira réplica do chunk 0.
+// O ingress de um arquivo é escolhido por round-robin entre arquivos (função ingress_for_file em dfs/cluster/placement.py), garantindo distribuição da carga de uploads entre os nós ao longo do tempo.
+// O ingress não é necessariamente a primeira réplica do chunk 0.
 // Como a regra é determinística, qualquer componente do sistema pode calcular o placement de um chunk apenas a partir do seu índice.
 //
 // Modelo de operação (gateway):
@@ -35,31 +30,27 @@
 //   - O coordenador NÃO toca em bytes. Só decide quem é o ingress/egress e persiste metadados.
 //
 // -----------------------------------------------------------------------------
-// SEPARAÇÃO EM TRÊS SERVIÇOS
-// -----------------------------------------------------------------------------
 //
-//   1. ControlService     — implementado pelo COORDENADOR
+// SEPARAÇÃO EM TRÊS SERVIÇOS:
+//
+//   1. ControlService - implementado pelo COORDENADOR
 //        clientes: CLI (operações de controle) e nós (registro/heartbeat)
 //        tráfego: pequeno (kB), RPCs unárias
 //
-//   2. DataService        — implementado pelos NÓS
+//   2. DataService -implementado pelos NÓS
 //        clientes: CLI (PUT e GET)
 //        tráfego: grande (MB-GB), RPCs com STREAMING
 //
-//   3. ReplicationService — implementado pelos NÓS
+//   3. ReplicationService - implementado pelos NÓS
 //        clientes: outros NÓS (ingress→réplicas, egress→peers)
 //                  e coordenador (re-replicação, deleção)
 //        tráfego: grande (MB), RPCs com STREAMING
-//
-// =============================================================================
 
 syntax = "proto3";
 
 package dfs.v1;
 
-// =============================================================================
 // MENSAGENS COMUNS (usadas por mais de um serviço)
-// =============================================================================
 
 // Identifica um nó do cluster. Usada em respostas de placement, em listas
 // de réplicas, em registros e em heartbeats.
@@ -88,9 +79,7 @@ enum NodeStatus {
   NODE_STATUS_DEAD = 3;    // Heartbeat ausente por tempo suficiente.
 }
 
-// =============================================================================
 // CONTROLSERVICE — Plano de Controle
-// =============================================================================
 //
 // Implementado pelo coordenador. Responsável por:
 //   - registro e supervisão dos nós (RegisterNode, Heartbeat)
@@ -98,10 +87,7 @@ enum NodeStatus {
 //   - persistência de metadados após operações concluídas (ConfirmUpload)
 //   - operações puramente de controle (DeleteFile, ListFiles)
 //
-// IMPORTANTE: NENHUMA RPC deste serviço transporta bytes de arquivos de
-// usuário. Todo o conteúdo aqui é metadado leve.
-//
-// =============================================================================
+// IMPORTANTE: NENHUMA RPC deste serviço transporta bytes de arquivos de usuário. Todo o conteúdo aqui é metadado leve.
 
 service ControlService {
   // ---------- Registro e supervisão de nós ----------
@@ -258,15 +244,10 @@ message ListFilesResponse {
   repeated FileEntry files = 1;
 }
 
-// =============================================================================
-// DATASERVICE — Plano de Dados (interface com a CLI)
-// =============================================================================
+// DATASERVICE - Plano de Dados (interface com a CLI)
 //
-// Implementado pelos NÓS. A CLI fala com este serviço APENAS depois de já
-// ter conversado com o coordenador no ControlService e recebido o endereço
-// do nó certo (ingress no PUT, egress no GET). Tudo aqui é STREAMING.
-//
-// =============================================================================
+// Implementado pelos NÓS. A CLI fala com este serviço APENAS depois de já ter conversado com o coordenador no ControlService e recebido o endereço do nó certo (ingress no PUT, egress no GET).
+// Tudo aqui é STREAMING.
 
 service DataService {
   // PUT (client-streaming): a CLI envia uma sequência de UploadChunk; ao final,
@@ -309,19 +290,14 @@ message DownloadChunk {
   bool is_last = 2;
 }
 
-// =============================================================================
-// REPLICATIONSERVICE — Comunicação entre Nós
-// =============================================================================
+// REPLICATIONSERVICE - Comunicação entre Nós
 //
-// Implementado pelos NÓS. Usado por OUTROS NÓS (e pelo coordenador para
-// operações administrativas como deleção).
+// Implementado pelos NÓS. Usado por OUTROS NÓS (e pelo coordenador para operações administrativas como deleção).
 //
 //   1. Ingress chama StoreChunk nas outras réplicas para fan-out durante o PUT.
 //   2. Egress chama FetchChunk nos peers para buscar chunks que não tem.
 //   3. DeleteChunk: chamada pelo coordenador para apagar um chunk específico.
 //   4. ListChunks: diagnóstico / validação cruzada com os metadados.
-//
-// =============================================================================
 
 service ReplicationService {
   // PUT lado-réplica: outro nó (o ingress) envia este chunk para ser armazenado.
