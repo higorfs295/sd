@@ -22,8 +22,16 @@ COORDINATOR_PORT = PORT
 
 # Tamanho do chunk do DFS: a unidade de placement e replicação.
 # É este valor que define em quantos chunks um arquivo é cortado, e quantas entradas de metadado e quantas rodadas de replicação ele gera.
-CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
+# Tamanho do chunk do DFS: a unidade de placement e replicação.
+# É este valor que define em quantos chunks um arquivo é cortado, e quantas entradas de metadado e quantas rodadas de replicação ele gera.
+# Valor mínimo e máximo são definidos para evitar chunks muito pequenos (muitos metadados e overhead) ou muito grandes (memória e stragglers).
+MIN_CHUNK_SIZE = 4 * 1024 * 1024
+MAX_CHUNK_SIZE = 64 * 1024 * 1024  # 64 MB: teto padrão GFS/HDFS (memória e straggler)
 
+# O tamanho do chunk é calculado dinamicamente a partir do tamanho do arquivo e da quantidade de nós, para balancear o número de chunks e evitar desequilíbrio.
+CHUNK_TARGET_MULTIPLIER = (
+    3  # alvo = 3 × nº de nós (over-partitioning, evita desequilíbrio)
+)
 # Tamanho do PEDAÇO DE TRANSPORTE do stream: quanto a CLI envia por mensagem gRPC ao subir/baixar um arquivo.
 # NÃO é unidade de placement nem de replicação, é só transporte.
 # Pequeno de propósito: mantém o uso de memória baixo e fica bem abaixo do limite default de mensagem do gRPC (4 MB).
@@ -89,18 +97,14 @@ NODE_ORDER = tuple(NODES.keys())
 TOTAL_SHARDS = len(NODE_ORDER)
 
 
-"""
-Parâmetros lidos pelo coordenador para supervisionar os nós via heartbeat, e enviados aos nós no registro (RegisterNodeResponse) para que todos usem os mesmos valores.
-Os tempos abaixo são múltiplos do intervalo de heartbeat: toleram algumas perdas de batimento antes de reagir, equilibrando rapidez de detecção contra falso positivo.
-"""
 # Intervalo esperado entre heartbeats de cada nó, em segundos.
 HEARTBEAT_INTERVAL = 2
 
 # Silêncio (sem heartbeat) a partir do qual o nó é reclassificado:
-#  - entre SUSPECT e DEAD: SUSPECT (atrasado; ~2 batimentos perdidos)
-#  - >= DEAD: DEAD (considerado fora do ar; ~4 batimentos perdidos)
-HEARTBEAT_SUSPECT = 4
-HEARTBEAT_DEAD = 8
+#  - entre SUSPECT e DEAD: SUSPECT (atrasado; ~4 batimentos perdidos)
+#  - >= DEAD: DEAD (considerado fora do ar; ~10 batimentos perdidos)
+HEARTBEAT_SUSPECT = 8
+HEARTBEAT_DEAD = 20
 
 # Quantidade de réplicas de cada chunk.
 REPLICATION_FACTOR = 3
