@@ -6,11 +6,11 @@ x-app-env: &app-env
   COORDINATOR_HOST: coordinator
   # Host anunciado de cada nó. Cada container resolve "nodeN" via DNS do compose.
   # Precisa estar em TODOS os containers por causa da re-replicação (nó-fonte resolve o destino pelo config local).
-  NODE1_HOST: node1
-  NODE2_HOST: node2
-  NODE3_HOST: node3
-  NODE4_HOST: node4
-  NODE5_HOST: node5
+  NODE1_HOST: 172.16.53.116
+  NODE2_HOST: 172.16.53.116
+  NODE3_HOST: 172.16.53.116
+  NODE4_HOST: 172.16.53.116
+  NODE5_HOST: 172.16.53.116
   # Broker interno do Kafka (listener INTERNAL). NÃO usar localhost:9092 dentro da rede.
   KAFKA_BROKER_URL: kafka-1:29092
 

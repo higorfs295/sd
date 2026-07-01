@@ -164,7 +164,7 @@ class StorageNodeApp:
             DataPlaneServicer(self.plans), self.server
         )
 
-        self.server.add_insecure_port(f"{self.node.host}:{self.node.port}")
+        self.server.add_insecure_port(f"0.0.0.0:{self.node.port}")
 
     def run(self) -> None:
         # 1. Liga o Listener do Kafka
