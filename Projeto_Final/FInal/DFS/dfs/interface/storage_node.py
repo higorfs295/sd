@@ -21,6 +21,7 @@ from dfs.pb import dfs_pb2_grpc, dataplane_pb2_grpc
 from .kafka_listener import DataPlaneCommandListener
 from pathlib import Path
 from dfs.cluster.node_registry import NodeRegistry, NodeInfo
+from dfs.cluster.kafka_publisher import emit_event
 
 
 class HeartbeatWorker:
@@ -37,19 +38,61 @@ class HeartbeatWorker:
     def _loop(self) -> None:
         # Garante que tens a biblioteca os importada (podes colocar no topo do ficheiro)
         import os
+        import csv
+        from pathlib import Path
+
+        # Log de instrumentação: caminho do CSV (uma linha por batimento real).
+        raiz_final = Path(__file__).resolve().parent.parent.parent.parent
+        log_path = (
+            raiz_final / "benchmark" / "csv" / f"heartbeat_real_{self.node.node_id}.csv"
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        novo = not log_path.exists()
+        if novo:
+            with open(log_path, "w", newline="") as f:
+                csv.writer(f).writerow(
+                    ["node_id", "timestamp_monotonic", "intervalo_real_s"]
+                )
+
+        anterior = time.monotonic()
 
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
+            agora = time.monotonic()
+            intervalo_real = agora - anterior  # ESTE é o dado que importa
+            anterior = agora
+
+            # Grava o intervalo real ANTES de chamar o coordenador, para o log
+            # capturar o atraso mesmo se o heartbeat() em si falhar.
+            with open(log_path, "a", newline="") as f:
+                csv.writer(f).writerow(
+                    [self.node.node_id, agora, round(intervalo_real, 4)]
+                )
+
             try:
                 # 1. Guarda a resposta do Coordenador numa variável
+                livre = shutil.disk_usage(self.node.storage_dir).free
+                inventario = self.storage.list_chunk_ids()
                 resposta = self.client.heartbeat(
                     self.node.node_id,
-                    shutil.disk_usage(self.node.storage_dir).free,
+                    livre,
                     0,
                     0,
-                    self.storage.list_chunk_ids(),  # Atenção: usa o método que já tens aí no teu código original
+                    inventario,
                 )
                 # print(f"[{self.node.node_id}] heartbeat OK")  # linha de depuração
+
+                # Telemetria (best-effort): alimenta o telemetry_hub com a saúde do nó.
+                emit_event(
+                    "heartbeat",
+                    {
+                        "node_id": self.node.node_id,
+                        "free_space_bytes": livre,
+                        "chunks": len(inventario),
+                        "intervalo_real_s": round(intervalo_real, 4),
+                    },
+                )
 
                 # ----------------para todos os efeitos, aqui chamamos o gc, dentro do loop do heartbeat, então é correlato ao m5.
                 if hasattr(resposta, "chunks_to_delete") and resposta.chunks_to_delete:
@@ -59,6 +102,10 @@ class HeartbeatWorker:
                             if self.storage.delete_chunk(chunk_id):
                                 print(
                                     f"🧹 [{self.node.node_id}] LIXO COLETADO: Chunk {chunk_id} foi apagado do disco."
+                                )
+                                emit_event(
+                                    "gc_delete",
+                                    {"node_id": self.node.node_id, "chunk_id": chunk_id},
                                 )
                             else:
                                 print(
@@ -186,4 +233,3 @@ def main(argv=None) -> None:
 
 if __name__ == "__main__":
     main()
-#commit

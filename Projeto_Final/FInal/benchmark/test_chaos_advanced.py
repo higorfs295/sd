@@ -1,103 +1,171 @@
+"""
+TESTE DE CAOS (tolerância a falhas) — versão coerente com o modelo REAL do projeto.
+====================================================================================
+
+Contexto: neste projeto os NÓS rodam como PROCESSOS Python locais (via
+run_cluster.py), não como contêineres Docker. O docker-compose.yml sobe apenas
+Kafka/Zookeeper. Por isso este teste NÃO mata um contêiner: ele injeta a falha
+matando o PROCESSO do nó-alvo (SIGKILL / TerminateProcess), espera o coordenador
+detectar a morte, prova o failover de leitura (download íntegro com o nó morto),
+e no fim RECUPERA o ambiente reiniciando o processo do nó.
+
+Multiplataforma: usa a biblioteca `psutil` para achar e matar o processo pelo
+command line ('--node-id nodeX'), funcionando igual no Windows e no Linux.
+
+Pré-requisito: cluster no ar (python run_cluster.py) e `pip install psutil`.
+
+Uso:
+    python benchmark/test_chaos_advanced.py            # alvo padrão: node2
+    python benchmark/test_chaos_advanced.py --node node3
+"""
+from __future__ import annotations
+
 import os
 import sys
 import time
+import argparse
 import hashlib
+import subprocess
 from pathlib import Path
-import docker  # <--- Integração com o Docker Engine
 
-# --- Injeção do Path real do seu projeto    ---
-_DFS_DIR = Path(__file__).resolve().parent.parent / "DFS"
-if str(_DFS_DIR) not in sys.path:
-    sys.path.insert(0, str(_DFS_DIR))
+try:
+    import psutil
+except ImportError:
+    print("❌ Falta a dependência 'psutil'. Rode: pip install psutil")
+    sys.exit(1)
 
-# Importando o seu client real
-from dfs.client import DataClient as DFSClient
+# Raiz do projeto (Final/) e pasta do pacote (Final/DFS/).
+_HERE = Path(__file__).resolve()
+ROOT_DIR = _HERE.parent.parent            # Final/
+DFS_DIR = ROOT_DIR / "DFS"
+if str(DFS_DIR) not in sys.path:
+    sys.path.insert(0, str(DFS_DIR))
 
-# Configuração Base (Como roda DENTRO do coordenador, apontamos para o localhost/127.0.0.1)
+from dfs.client import DataClient as DFSClient  # noqa: E402
+
 COORD_HOST = "127.0.0.1"
-COORD_PORT = 9100  
-TEST_FILE = "dados_vitais_chaos.dat"
+COORD_PORT = 9100
+TEST_FILE = str(ROOT_DIR / "dados_vitais_chaos.dat")
 REMOTE_PATH = "/chaos_test/dados_vitais.dat"
 
-# Nome do contêiner alvo definido no seu docker-compose.yml
-TARGET_CONTAINER = "dfs-node2" 
 
-def get_hash(filepath):
-    """Calcula o MD5 do arquivo para verificar corrupção."""
+def get_hash(filepath: str) -> str:
     hasher = hashlib.md5()
-    with open(filepath, 'rb') as f:
-        buf = f.read(65536)
-        while len(buf) > 0:
-            hasher.update(buf)
-            buf = f.read(65536)
+    with open(filepath, "rb") as f:
+        for bloco in iter(lambda: f.read(65536), b""):
+            hasher.update(bloco)
     return hasher.hexdigest()
 
-def main():
+
+def encontrar_processo_do_no(node_id: str) -> psutil.Process | None:
+    """
+    Procura o processo Python cujo command line contém 'storage_node' e
+    '--node-id <node_id>'. Multiplataforma (não depende de PowerShell/wmic).
+    """
+    alvo = f"--node-id {node_id}"
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmd = " ".join(proc.info["cmdline"] or [])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if "storage_node" in cmd and alvo in cmd:
+            return proc
+    return None
+
+
+def reiniciar_no(node_id: str) -> None:
+    """Sobe de novo o processo do nó, com o mesmo PYTHONPATH que o run_cluster usa."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(DFS_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    subprocess.Popen(
+        [sys.executable, "-m", "dfs.interface.storage_node", "--node-id", node_id],
+        cwd=str(DFS_DIR),
+        env=env,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Teste de caos por morte de processo de nó.")
+    parser.add_argument("--node", default="node2", help="Nó-alvo a ser derrubado (default: node2)")
+    parser.add_argument("--espera", type=int, default=25, help="Segundos aguardando a detecção da morte")
+    args = parser.parse_args()
+    node_id = args.node
+
     print("\n=======================================================")
-    print("🔥 INICIANDO TESTE DE CAOS INTERNO (TOLERÂNCIA A FALHAS) 🔥")
+    print("🔥 TESTE DE CAOS (morte de PROCESSO de nó) 🔥")
     print("=======================================================\n")
-    
-    # Conecta ao socket do Docker injetado no contêiner
-    try:
-        docker_client = docker.from_env()
-        container_alvo = docker_client.containers.get(TARGET_CONTAINER)
-    except Exception as e:
-        print(f"❌ Erro ao conectar ao Docker: {e}")
-        print("Verifique se o volume do docker.sock foi mapeado e se rodou 'pip install docker'.")
-        return
 
     # 1. Preparação
-    print(f"-> Gerando arquivo de teste de 5MB...")
+    print("-> Gerando arquivo de teste de 5MB...")
     with open(TEST_FILE, "wb") as f:
         f.write(os.urandom(5 * 1024 * 1024))
     hash_original = get_hash(TEST_FILE)
 
     client = DFSClient(COORD_HOST, COORD_PORT)
-    
+
     # 2. Upload
-    print(f"-> Fazendo upload para {REMOTE_PATH}...")
+    print(f"-> Upload para {REMOTE_PATH}...")
     client.upload_file(TEST_FILE, REMOTE_PATH)
-    print("✅ Upload inicial concluído com sucesso.")
+    print("✅ Upload inicial concluído.")
 
-    # 3. Injeta a Falha (Substitui o os.kill/SIGKILL original por container.kill)
-    print(f"\n☠️  INJETANDO FALHA: Forçando a parada imediata do contêiner ({TARGET_CONTAINER})...")
-    try:
-        container_alvo.kill()  # O método .kill() envia um SIGKILL direto ao contêiner, simulando queda abrupta
-        print(f"⚠️  O contêiner '{TARGET_CONTAINER}' foi derrubado com sucesso.")
-    except Exception as e:
-        print(f"❌ Falha ao derrubar o contêiner: {e}")
+    # 3. Injeta a falha: mata o PROCESSO do nó-alvo.
+    print(f"\n☠️  Localizando e matando o processo de '{node_id}'...")
+    proc = encontrar_processo_do_no(node_id)
+    if proc is None:
+        print(f"❌ Não encontrei um processo com '--node-id {node_id}'. O cluster está no ar?")
+        _limpar()
         return
-    
-    print("⏳ Aguardando 15 segundos para o Coordenador detectar a falha (Heartbeat Timeout)...")
-    time.sleep(15)
+    pid = proc.pid
+    try:
+        proc.kill()              # SIGKILL no Linux / TerminateProcess no Windows
+        proc.wait(timeout=5)
+        print(f"⚠️  Processo de '{node_id}' (PID {pid}) derrubado.")
+    except Exception as e:
+        print(f"❌ Falha ao matar o processo: {e}")
+        _limpar()
+        return
 
-    # 4. Tenta baixar o arquivo com o nó morto
-    print(f"\n-> Tentando realizar o download do arquivo recuperado...")
-    down_file = "download_recuperado_chaos.dat"
-    
+    print(f"⏳ Aguardando {args.espera}s para o coordenador detectar a morte (HEARTBEAT_DEAD)...")
+    time.sleep(args.espera)
+
+    # 4. Download com o nó morto (prova do failover de leitura).
+    print("\n-> Tentando o download com o nó ainda morto...")
+    down_file = str(ROOT_DIR / "download_recuperado_chaos.dat")
+    integro = False
     try:
         client.download_file(REMOTE_PATH, down_file)
-        hash_recuperado = get_hash(down_file)
-        
-        if hash_recuperado == hash_original:
-            print("\n✅ [SUCESSO ABSOLUTO] O sistema se recuperou!")
-            print("O arquivo foi baixado íntegro mesmo com um nó do cluster morto.")
+        integro = get_hash(down_file) == hash_original
+        if integro:
+            print("\n✅ [SUCESSO] Arquivo baixado ÍNTEGRO mesmo com um nó morto (failover OK).")
         else:
-            print("\n❌ [FALHA] O arquivo foi baixado, mas está CORROMPIDO.")
+            print("\n❌ [FALHA] Arquivo baixado, mas CORROMPIDO.")
     except Exception as e:
-        print(f"\n❌ [FALHA CRÍTICA] O cluster falhou em entregar o arquivo. Erro: {e}")
+        print(f"\n❌ [FALHA] O cluster não entregou o arquivo. Erro: {e}")
     finally:
-        # 5. Recuperação automática do ambiente de testes
-        print(f"\n🚀 RECUPERAÇÃO: Reiniciando o contêiner {TARGET_CONTAINER} para normalizar o cluster...")
+        # 5. Recuperação do ambiente: reinicia o processo do nó.
+        print(f"\n🚀 RECUPERAÇÃO: reiniciando o processo de '{node_id}'...")
         try:
-            container_alvo.start()
-            print(f"✅ Contêiner {TARGET_CONTAINER} está de volta online.")
+            reiniciar_no(node_id)
+            print(f"✅ '{node_id}' reiniciado. Ele vai se re-registrar no coordenador.")
         except Exception as e:
-            print(f"⚠️  Não foi possível reiniciar o contêiner automaticamente: {e}")
+            print(f"⚠️  Não consegui reiniciar '{node_id}' automaticamente: {e}")
+        _limpar(down_file)
 
-        # Limpeza de arquivos temporários locais
-        if os.path.exists(TEST_FILE): os.remove(TEST_FILE)
-        if os.path.exists(down_file): os.remove(down_file)
+    print("\n=======================================================")
+    print(f"  Failover de leitura: {'✅ OK' if integro else '❌ FALHOU'}")
+    print("=======================================================\n")
+
+
+def _limpar(*extras: str) -> None:
+    for f in (TEST_FILE, *extras):
+        try:
+            if f and os.path.exists(f):
+                os.remove(f)
+        except OSError:
+            pass
+
 
 if __name__ == "__main__":
     main()

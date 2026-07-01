@@ -5,4 +5,5 @@ kafka-python-ng
 pandas
 matplotlib
 seaborn
+psutil
 docker

@@ -13,6 +13,8 @@ from dfs.storage.local_storage import LocalStorage
 from dfs.pb import dfs_pb2, dfs_pb2_grpc
 from dfs.cluster.control_client import ControlClient
 from dfs.cluster.replication_client import ReplicationClient
+from dfs.cluster.net_sim import apply_network_delay
+from dfs.cluster.kafka_publisher import emit_event
 
 
 class DataPlaneCommandListener:
@@ -24,6 +26,12 @@ class DataPlaneCommandListener:
         self.topic = f'storage-node-{node_id}-commands'
 
         self.broker_url = broker_url or os.getenv("KAFKA_BROKER_URL", "127.0.0.1:9092")
+
+        # Tabela de despacho de ações. Facilita "completar" o listener: para uma
+        # ação nova, basta registrar um handler aqui.
+        self._handlers = {
+            "REPLICATE_CHUNK": self._handle_replicate,
+        }
 
         # Sistema de retries (tenta 5 vezes antes de falhar)
         max_retries = 5
@@ -54,24 +62,20 @@ class DataPlaneCommandListener:
             try:
                 command = message.value
                 action = command.get('action')
-
-                if action == 'REPLICATE_CHUNK':
-                    self._handle_replicate(command)
-                else:
+                handler = self._handlers.get(action)
+                if handler is None:
                     print(f"[{self.node_id}] [Kafka] Comando desconhecido: {action}")
+                    continue
+                handler(command)
             except Exception as e:
                 print(f"[{self.node_id}] [Kafka] Erro no processamento da mensagem: {e}")
 
     def _transfer_chunk(self, chunk_id: str, target_node_id: str) -> bool:
         """
-        Copia um chunk LOCAL para o nó de destino via gRPC.
+        Copia um chunk LOCAL para o nó de destino via gRPC (StoreChunk, client-streaming).
 
-        CORREÇÃO: StoreChunk é uma RPC CLIENT-STREAMING — precisa de um ITERADOR
-        de StoreChunkRequest (em pedaços de STREAM_SIZE), não de uma mensagem
-        única. Passar uma mensagem só causava o erro
-        'StatusCode.UNKNOWN: Exception iterating requests!'.
-        Reusamos o ReplicationClient.store_chunk(), o MESMO cliente de streaming
-        usado no fan-out do upload (já testado), em vez de reinventar a chamada.
+        A simulação de atraso de rede agora vem do helper compartilhado net_sim
+        (mesmo NETWORK_DELAY usado no fan-out do upload e no failover do download).
         """
         try:
             # 1. Valida se o chunk existe localmente
@@ -79,19 +83,13 @@ class DataPlaneCommandListener:
                 print(f"[{self.node_id}] [Kafka] Chunk '{chunk_id}' não encontrado localmente.")
                 return False
 
-            # --- SIMULAÇÃO DE ATRASO DE REDE ---
-            delay = float(os.getenv("NETWORK_DELAY", "0.0"))
-            if delay > 0:
-                print(f"[{self.node_id}] [Simulação] Atraso de rede: dormindo {delay}s...")
-                time.sleep(delay)
-            # -----------------------------------
+            # Simulação de atraso de rede (centralizada em net_sim).
+            apply_network_delay(context="rereplicacao", node_id=self.node_id)
 
             data = self.storage.read_chunk(chunk_id)
             target_node = self.registry.get(target_node_id)
 
             # Deriva chunk_index e upload_id do chunk_id "<upload_id>_chunk_<idx>".
-            # O servidor StoreChunk só usa chunk_id + bytes, mas preenchemos os
-            # metadados para a mensagem ficar coerente com o fan-out do upload.
             if "_chunk_" in chunk_id:
                 upload_id, _, idx_str = chunk_id.rpartition("_chunk_")
                 chunk_index = int(idx_str) if idx_str.isdigit() else 0
@@ -122,14 +120,26 @@ class DataPlaneCommandListener:
     def _handle_replicate(self, command: dict) -> None:
         chunk_id = command.get('chunk_id')
         target_node_id = command.get('target_node_id')      # DESTINO
-        removed_node_id = command.get('removed_node_id')    # nó morto (fecha o ciclo)
+        removed_node_id = command.get('removed_node_id')    # nó morto/drenado (fecha o ciclo)
         if not chunk_id or not target_node_id:
             return
 
         print(f"[{self.node_id}] [Kafka] Replicando '{chunk_id}' -> '{target_node_id}'...")
         if self._transfer_chunk(chunk_id, target_node_id):
             print(f"[{self.node_id}] [Kafka] Replicação de '{chunk_id}' concluída.")
-            # Fecha o ciclo: coordenador troca o nó morto pelo novo (idempotente).
+
+            # Telemetria (best-effort): alimenta o telemetry_hub.
+            emit_event(
+                "rereplication_applied",
+                {
+                    "chunk_id": chunk_id,
+                    "source": self.node_id,
+                    "destiny": target_node_id,
+                    "removed": removed_node_id,
+                },
+            )
+
+            # Fecha o ciclo: coordenador troca o nó morto/drenado pelo novo (idempotente).
             if removed_node_id:
                 try:
                     client = ControlClient()

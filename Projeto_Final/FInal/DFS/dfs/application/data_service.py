@@ -8,10 +8,18 @@ DataServicer — interface da CLI com o nó (plano de dados, streaming).
 
 O mapa de ChunkPlacement vem do PlanStore (handoff via DataPlaneService.SetUploadPlan
 / SetDownloadPlan), resolvido por upload_id / download_id.
+
+NETWORK_DELAY: o fan-out do upload e o failover do download agora aplicam o mesmo
+atraso de rede simulado (helper net_sim), então a variável afeta o caminho de
+upload/leitura, e não só a re-replicação.
+
+TELEMETRIA: publica métricas (duração de upload/download) e eventos (upload_confirmado,
+download_servido) no Kafka, best-effort, para o telemetry_hub montar a visão do sistema.
 """
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import grpc
@@ -19,6 +27,8 @@ import grpc
 from dfs.config import STREAM_SIZE, REPLICATION_FACTOR
 from dfs.cluster.control_client import ControlClient
 from dfs.cluster.replication_client import ReplicationClient
+from dfs.cluster.net_sim import apply_network_delay
+from dfs.cluster.kafka_publisher import emit_metric, emit_event
 from dfs.pb import dfs_pb2, dfs_pb2_grpc
 
 
@@ -31,6 +41,7 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
 
     # ------------------------------------------------------------------- PUT
     def UploadFile(self, request_iterator, context):
+        t0 = time.perf_counter()
         upload_id = None
         chunk_index = 0
         chunks_written = 0
@@ -92,7 +103,6 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
                 total_bytes += len(msg.data)
 
                 # Fatia usando o tamanho planejado para este chunk (chunk adaptável).
-                # O tamanho vem do plano (size_bytes de cada ChunkPlacement).
                 tam = tamanho_por_indice.get(chunk_index)
                 while tam is not None and len(buffer) >= tam:
                     fechar_chunk(chunk_index, bytes(buffer[:tam]))
@@ -121,6 +131,28 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
         finally:
             self.plans.clear_upload(upload_id)
 
+        # Telemetria (best-effort): duração e evento do upload no nó ingress.
+        dur = time.perf_counter() - t0
+        emit_metric(
+            "upload",
+            dur,
+            extra={
+                "node_id": self.node_id,
+                "chunks": chunks_written,
+                "bytes": total_bytes,
+            },
+        )
+        emit_event(
+            "upload_confirmado",
+            {
+                "node_id": self.node_id,
+                "upload_id": upload_id,
+                "chunks": chunks_written,
+                "bytes": total_bytes,
+                "duracao_s": round(dur, 4),
+            },
+        )
+
         return dfs_pb2.UploadResult(
             ok=True,
             message="upload concluído",
@@ -132,8 +164,10 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
         alvos = [r for r in reps if r.node_id != self.node_id]
 
         def enviar(r):
-            # Tentar gravar numa réplica.
-            # Se ela estiver morta/inacessível, não propaga a exceção: devolve None (= "não confirmou"), e a política de quórum W decide se ainda há réplicas vivas suficientes.
+            # Simula latência de rede (NETWORK_DELAY) ANTES de mandar o chunk pela
+            # rede. É o que faz a variável afetar o UPLOAD, e não só a re-replicação.
+            # Roda dentro do worker paralelo, então o custo por réplica se sobrepõe.
+            apply_network_delay(context="fan-out", node_id=self.node_id)
             cli = ReplicationClient(r.host, r.port)
             try:
                 return cli.store_chunk(chunk_id, idx, upload_id, self.node_id, data)
@@ -160,6 +194,7 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
 
     # ------------------------------------------------------------------- GET
     def DownloadFile(self, request, context):
+        t0 = time.perf_counter()
         download_id = request.download_id
         entrada = self.plans.get_download(download_id)
         if entrada is None:
@@ -170,12 +205,14 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
             )
         _total, chunks = entrada
         chunks = sorted(chunks, key=lambda c: c.chunk_index)
+        bytes_servidos = 0
         try:
             for cp in chunks:
                 if self.storage.has_chunk(cp.chunk_id):
                     data = self.storage.read_chunk(cp.chunk_id)
                 else:
                     data = self._buscar_em_peer(cp)
+                bytes_servidos += len(data)
                 emitido = False
                 for i in range(0, len(data), STREAM_SIZE):
                     ultimo = cp.chunk_index == chunks[
@@ -190,11 +227,29 @@ class DataServicer(dfs_pb2_grpc.DataServiceServicer):
                     yield dfs_pb2.DownloadChunk(data=b"", is_last=ultimo)
         finally:
             self.plans.clear_download(download_id)
+            # Telemetria (best-effort): duração e volume do download no nó egress.
+            dur = time.perf_counter() - t0
+            emit_metric(
+                "download",
+                dur,
+                extra={"node_id": self.node_id, "bytes": bytes_servidos},
+            )
+            emit_event(
+                "download_servido",
+                {
+                    "node_id": self.node_id,
+                    "download_id": download_id,
+                    "bytes": bytes_servidos,
+                    "duracao_s": round(dur, 4),
+                },
+            )
 
     def _buscar_em_peer(self, cp) -> bytes:
         for r in cp.replicas:
             if r.node_id == self.node_id:
                 continue
+            # Mesmo atraso de rede simulado do fan-out, agora no failover de leitura.
+            apply_network_delay(context="fetch-peer", node_id=self.node_id)
             cli = ReplicationClient(r.host, r.port)
             try:
                 return cli.fetch_chunk(cp.chunk_id, self.node_id)
