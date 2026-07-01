@@ -11,14 +11,27 @@ CONVENÇÃO DE NOME DO CHUNK (importante p/ o observer):
   <root>/chunks/<chunk_id>. Assim o nome termina em "_chunk_<N>" e casa com o
   regex do observer (_chunk_\\d+$). Se algum dia quiser usar extensão (.bin),
   ajuste o REGEX_CHUNK do observer junto.
+
+ESCRITA ATÔMICA (correção de integridade):
+  store_chunk grava primeiro em "<chunk_id>.tmp" e só então faz os.replace para o
+  nome final. os.replace é atômico dentro do mesmo filesystem: ou o chunk final
+  existe inteiro, ou nem aparece. Nunca há um chunk PARCIAL com o nome final.
+  Consequências:
+    - Uma escrita interrompida (processo morto no meio) deixa no máximo um ".tmp",
+      nunca um chunk final corrompido. Esse ".tmp" é exatamente o que o
+      storage_garbage_collector.py limpa (agora o ramo de ".tmp" faz sentido).
+    - list_chunk_ids NUNCA reporta ".tmp": o block report não conta escritas em
+      andamento como chunks válidos, evitando falso "órfão" e leituras de parcial.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from dfs.config import STORAGE_DIR
 
 CHUNKS_SUBDIR = "chunks"
+TMP_SUFFIX = ".tmp"
 
 
 class LocalStorage:
@@ -74,10 +87,32 @@ class LocalStorage:
         return target
 
     def store_chunk(self, chunk_id: str, data: bytes) -> int:
-        """Grava um chunk inteiro no disco local. Retorna bytes gravados."""
+        """
+        Grava um chunk inteiro no disco local de forma ATÔMICA. Retorna bytes gravados.
+
+        Escreve em "<chunk_id>.tmp" e só então os.replace para o nome final. Se algo
+        falhar no meio, remove o ".tmp" e propaga a exceção — nunca deixa um chunk
+        final parcial. O ".tmp" residual (se o processo morrer antes do replace) é
+        limpo pelo storage_garbage_collector.py.
+        """
         target = self._chunk_path(chunk_id)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+        tmp = target.with_name(target.name + TMP_SUFFIX)
+        try:
+            # Grava o conteúdo no temporário e força a descarga no disco antes do rename.
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())  # garante os bytes em disco antes do replace
+            os.replace(tmp, target)  # atômico no mesmo filesystem
+        except Exception:
+            # Escrita interrompida: limpa o parcial e propaga (quem chama trata/loga).
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            raise
         return len(data)
 
     def read_chunk(self, chunk_id: str) -> bytes:
@@ -85,6 +120,7 @@ class LocalStorage:
         return self._chunk_path(chunk_id).read_bytes()
 
     def has_chunk(self, chunk_id: str) -> bool:
+        # Só considera presente o chunk FINAL (um ".tmp" em andamento não conta).
         return self._chunk_path(chunk_id).exists()
 
     def delete_chunk(self, chunk_id: str) -> bool:
@@ -98,4 +134,10 @@ class LocalStorage:
         base = self.root / CHUNKS_SUBDIR
         if not base.exists():
             return []
-        return sorted(p.name for p in base.iterdir() if p.is_file())
+        # Exclui ".tmp": escritas em andamento não entram no block report do heartbeat,
+        # evitando falso "órfão" e evitando anunciar um chunk que ainda não existe inteiro.
+        return sorted(
+            p.name
+            for p in base.iterdir()
+            if p.is_file() and not p.name.endswith(TMP_SUFFIX)
+        )

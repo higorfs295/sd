@@ -21,6 +21,7 @@ from dfs.pb import dfs_pb2_grpc, dataplane_pb2_grpc
 from .kafka_listener import DataPlaneCommandListener
 from pathlib import Path
 from dfs.cluster.node_registry import NodeRegistry, NodeInfo
+from dfs.cluster.kafka_publisher import emit_event
 
 
 class HeartbeatWorker:
@@ -71,14 +72,27 @@ class HeartbeatWorker:
 
             try:
                 # 1. Guarda a resposta do Coordenador numa variável
+                livre = shutil.disk_usage(self.node.storage_dir).free
+                inventario = self.storage.list_chunk_ids()
                 resposta = self.client.heartbeat(
                     self.node.node_id,
-                    shutil.disk_usage(self.node.storage_dir).free,
+                    livre,
                     0,
                     0,
-                    self.storage.list_chunk_ids(),
+                    inventario,
                 )
                 # print(f"[{self.node.node_id}] heartbeat OK")  # linha de depuração
+
+                # Telemetria (best-effort): alimenta o telemetry_hub com a saúde do nó.
+                emit_event(
+                    "heartbeat",
+                    {
+                        "node_id": self.node.node_id,
+                        "free_space_bytes": livre,
+                        "chunks": len(inventario),
+                        "intervalo_real_s": round(intervalo_real, 4),
+                    },
+                )
 
                 # ----------------para todos os efeitos, aqui chamamos o gc, dentro do loop do heartbeat, então é correlato ao m5.
                 if hasattr(resposta, "chunks_to_delete") and resposta.chunks_to_delete:
@@ -88,6 +102,10 @@ class HeartbeatWorker:
                             if self.storage.delete_chunk(chunk_id):
                                 print(
                                     f"🧹 [{self.node.node_id}] LIXO COLETADO: Chunk {chunk_id} foi apagado do disco."
+                                )
+                                emit_event(
+                                    "gc_delete",
+                                    {"node_id": self.node.node_id, "chunk_id": chunk_id},
                                 )
                             else:
                                 print(
