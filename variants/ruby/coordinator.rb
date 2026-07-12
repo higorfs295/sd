@@ -4,15 +4,14 @@
 # coordinator.rb — Coordenador (plano de controle) da variante Ruby.
 #
 # Espelha server.py + node_registry.py + metadata_service.py +
-# replication_watcher.py do original. O coordenador é o cérebro do sistema:
-#   - Guarda os METADADOS (quais arquivos existem, em quantos chunks, e em quais
-#     nós cada chunk está replicado), persistidos em JSON.
-#   - Mantém o REGISTRO DE NÓS com a máquina de estados de vivacidade
-#     (ALIVE / SUSPECT / DEAD) calculada preguiçosamente pelo último heartbeat.
-#   - Decide o PLACEMENT determinístico dos chunks e o ingress de cada arquivo.
-#   - Roda o SUPERVISOR DE RE-REPLICAÇÃO, que detecta mortes e restaura o fator
-#     de replicação copiando chunks de uma réplica viva para um nó de destino.
-#   - Faz GARBAGE COLLECTION de órfãos a partir do block report dos heartbeats.
+# replication_watcher.py do original. Cérebro do sistema:
+#   - METADADOS (arquivos -> chunks -> réplicas), persistidos em JSON.
+#   - REGISTRO DE NÓS com máquina de vivacidade (ALIVE/SUSPECT/DEAD) preguiçosa.
+#   - PLACEMENT determinístico + escolha de INGRESS (round-robin entre nós vivos)
+#     e de EGRESS (por localidade: o nó vivo com mais chunks do arquivo).
+#   - SUPERVISOR DE RE-REPLICAÇÃO e GARBAGE COLLECTION por block report.
+#   - TELEMETRIA: agrega métricas de upload/download reportadas pelos nós
+#     ingress/egress (min/máx/média/contagem), no espírito do telemetry_hub.
 #
 # O coordenador NUNCA toca nos bytes dos arquivos do usuário — só metadados.
 # =============================================================================
@@ -38,7 +37,12 @@ module DFS
       @suspected_orphans = Hash.new { |h, k| h[k] = {} } # node_id => {chunk_id=>count}
       @pending_deletes = Hash.new { |h, k| h[k] = [] }   # node_id => [chunk_id]
       @prev_state = {}       # node_id => estado anterior (p/ detectar transições)
-      @file_counter = 0      # contador monotônico p/ escolha de ingress
+      @upload_counter = 0    # contador monotônico p/ round-robin de ingress
+
+      # Telemetria: agregados por operação + contadores de eventos.
+      @metrics = Hash.new { |h, k| h[k] = { 'count' => 0, 'total' => 0.0, 'min' => nil, 'max' => nil, 'bytes' => 0 } }
+      @rereplications = 0
+      @gc_deletes = 0
 
       # Membership canônica: a lista OFICIAL dos N nós (base do placement).
       @membership = DFS::Config.node_order
@@ -69,6 +73,8 @@ module DFS
       when 'DELETE_FILE'      then handle_delete_file(req)
       when 'LIST_FILES'       then handle_list_files
       when 'UPDATE_REPLICAS'  then handle_update_replicas(req)
+      when 'METRIC'           then handle_metric(req)
+      when 'METRICS'          then handle_metrics
       when 'STATUS'           then handle_status
       else { 'ok' => false, 'error' => "op desconhecida: #{req['op']}" }
       end
@@ -99,27 +105,26 @@ module DFS
         node['last_hb'] = Time.now.to_f
         node['chunks'] = Array(req['chunks'])
 
-        # Deleções pendentes (DELETE que falhou enquanto o nó estava morto).
         pend = @pending_deletes.delete(nid) || []
         to_delete.concat(pend)
 
-        # Detecção de órfãos por block report, com confirmação em 2 ciclos.
         expected = expected_chunks_for(nid)
         seen = node['chunks'].to_set
         suspects = @suspected_orphans[nid]
         current_orphans = seen - expected
-        # incrementa contagem dos que continuam órfãos; zera os que sumiram
         suspects.each_key { |cid| suspects.delete(cid) unless current_orphans.include?(cid) }
         current_orphans.each do |cid|
           suspects[cid] = (suspects[cid] || 0) + 1
-          to_delete << cid if suspects[cid] >= 2 # confirmado em 2 ciclos
+          to_delete << cid if suspects[cid] >= 2
         end
+        @gc_deletes += to_delete.size
       end
       { 'ok' => true, 'delete' => to_delete.uniq }
     end
 
-    # RequestUpload: calcula chunk_size, número de chunks, placement de cada
-    # chunk (sobre a membership canônica) e o ingress do arquivo. Devolve o plano.
+    # RequestUpload: calcula chunk_size, placement de cada chunk (membership
+    # canônica) e escolhe o INGRESS entre os nós VIVOS (round-robin por arquivo).
+    # O cliente NÃO fatia nada — quem fatia e replica é o ingress.
     def handle_request_upload(req)
       size = req['size'].to_i
       upload_id = "up_#{SecureRandom.hex(6)}"
@@ -127,39 +132,39 @@ module DFS
       num_chunks = size <= 0 ? 1 : (size.to_f / chunk_size).ceil
       num_chunks = 1 if num_chunks.zero?
 
-      @mutex.synchronize { @file_counter += 1 }
-
       chunks = (0...num_chunks).map do |i|
         replica_ids = DFS::Placement.replicas_for_chunk(
           i, @membership, REPLICATION_FACTOR, cluster_size: @membership.size
         )
-        # Só aceitamos a escrita se houver ao menos WRITE_QUORUM réplicas vivas.
         live = replica_ids.select { |rid| state_of(rid) != DEAD }
-        {
-          'index' => i,
-          'chunk_id' => "#{upload_id}_chunk_#{i}",
-          'replicas' => replica_ids.map { |rid| addr(rid) },
-          'live_count' => live.size
-        }
+        { 'index' => i, 'chunk_id' => "#{upload_id}_chunk_#{i}",
+          'replicas' => replica_ids.map { |rid| addr(rid) }, 'live_count' => live.size }
       end
 
       insufficient = chunks.find { |c| c['live_count'] < WRITE_QUORUM }
-      if insufficient
-        return { 'ok' => false,
-                 'error' => "réplicas vivas insuficientes p/ quórum no chunk #{insufficient['index']}" }
-      end
+      return { 'ok' => false, 'error' => "réplicas vivas insuficientes p/ quórum no chunk #{insufficient['index']}" } if insufficient
 
-      log "upload #{upload_id} p/ #{req['path']}: #{num_chunks} chunk(s) de #{chunk_size} B"
+      # Ingress: round-robin ENTRE os nós vivos (o placement usa a canônica).
+      live_members = @membership.select { |m| state_of(m) != DEAD }
+      return { 'ok' => false, 'error' => 'nenhum nó vivo para ingress' } if live_members.empty?
+
+      idx = nil
+      @mutex.synchronize { idx = @upload_counter; @upload_counter += 1 }
+      ingress_id = DFS::Placement.sort_nodes(live_members)[idx % live_members.size]
+
+      log "upload #{upload_id} p/ #{req['path']}: #{num_chunks} chunk(s) de #{chunk_size} B, ingress=#{ingress_id}"
       { 'ok' => true, 'upload_id' => upload_id, 'chunk_size' => chunk_size,
-        'num_chunks' => num_chunks, 'chunks' => chunks }
+        'num_chunks' => num_chunks, 'ingress' => addr(ingress_id), 'chunks' => chunks }
     end
 
     # ConfirmUpload: registra o arquivo nos metadados com as réplicas efetivas.
+    # É chamado pelo INGRESS (que sabe o que gravou), não pelo cliente fraco.
     def handle_confirm_upload(req)
       @mutex.synchronize do
         @metadata['files'][req['path']] = {
           'num_chunks' => req['chunks'].size,
           'chunk_size' => req['chunk_size'],
+          'size' => req['size'],
           'created_at' => Time.now.to_f,
           'chunks' => req['chunks'].map do |c|
             { 'index' => c['index'], 'chunk_id' => c['chunk_id'], 'replicas' => c['replicas'] }
@@ -167,27 +172,32 @@ module DFS
         }
         persist_metadata
       end
-      log "arquivo #{req['path']} confirmado nos metadados"
+      log "arquivo #{req['path']} confirmado nos metadados (ingress=#{req['ingress']})"
       { 'ok' => true }
     end
 
-    # RequestDownload: devolve o mapa de chunks com as réplicas vivas.
+    # RequestDownload: devolve o mapa de chunks e escolhe o EGRESS por LOCALIDADE
+    # (o nó vivo que já tem o maior número de chunks do arquivo).
     def handle_request_download(req)
       entry = nil
       @mutex.synchronize { entry = @metadata['files'][req['path']] }
       return { 'ok' => false, 'error' => 'arquivo não encontrado' } unless entry
 
-      # replicas nos metadados já são hashes {node_id,host,port}; preferimos as vivas.
       chunks = entry['chunks'].map do |c|
-        live = c['replicas'].select { |r| state_of(r['node_id']) != DEAD }
-        { 'index' => c['index'], 'chunk_id' => c['chunk_id'],
-          'replicas' => (live.empty? ? c['replicas'] : live) }
+        { 'index' => c['index'], 'chunk_id' => c['chunk_id'], 'replicas' => c['replicas'] }
       end
-      { 'ok' => true, 'num_chunks' => entry['num_chunks'], 'chunks' => chunks }
+
+      counts = Hash.new(0)
+      entry['chunks'].each do |c|
+        c['replicas'].each { |r| counts[r['node_id']] += 1 if state_of(r['node_id']) != DEAD }
+      end
+      return { 'ok' => false, 'error' => 'nenhuma réplica viva para servir o download' } if counts.empty?
+
+      egress_id = counts.max_by { |_nid, cnt| cnt }.first
+      log "download #{req['path']}: egress=#{egress_id} (#{counts[egress_id]} de #{entry['num_chunks']} chunks locais)"
+      { 'ok' => true, 'num_chunks' => entry['num_chunks'], 'egress' => addr(egress_id), 'chunks' => chunks }
     end
 
-    # DeleteFile: apaga cada réplica (best-effort) e remove o índice. Réplicas em
-    # nós mortos viram deleções pendentes, entregues quando o nó voltar.
     def handle_delete_file(req)
       entry = nil
       @mutex.synchronize { entry = @metadata['files'][req['path']] }
@@ -219,7 +229,7 @@ module DFS
       files = @mutex.synchronize do
         @metadata['files'].map do |path, e|
           nodes = e['chunks'].flat_map { |c| c['replicas'].map { |r| r['node_id'] } }.uniq.sort
-          { 'path' => path, 'num_chunks' => e['num_chunks'], 'nodes' => nodes }
+          { 'path' => path, 'num_chunks' => e['num_chunks'], 'size' => e['size'], 'nodes' => nodes }
         end
       end
       { 'ok' => true, 'files' => files }
@@ -237,9 +247,40 @@ module DFS
       { 'ok' => true }
     end
 
+    # METRIC: um nó ingress/egress reporta a duração e o volume de uma operação.
+    def handle_metric(req)
+      op = req['metric'] # 'upload' | 'download'
+      @mutex.synchronize do
+        m = @metrics[op]
+        dur = req['duration'].to_f
+        m['count'] += 1
+        m['total'] += dur
+        m['bytes'] += req['bytes'].to_i
+        m['min'] = dur if m['min'].nil? || dur < m['min']
+        m['max'] = dur if m['max'].nil? || dur > m['max']
+      end
+      { 'ok' => true }
+    end
+
+    def handle_metrics
+      @mutex.synchronize do
+        ops = {}
+        @metrics.each do |op, m|
+          avg = m['count'].zero? ? 0.0 : m['total'] / m['count']
+          ops[op] = { 'count' => m['count'], 'avg_ms' => (avg * 1000).round(2),
+                      'min_ms' => ((m['min'] || 0) * 1000).round(2),
+                      'max_ms' => ((m['max'] || 0) * 1000).round(2),
+                      'bytes' => m['bytes'] }
+        end
+        { 'ok' => true, 'ops' => ops, 'rereplications' => @rereplications,
+          'gc_deletes' => @gc_deletes, 'files' => @metadata['files'].size }
+      end
+    end
+
     def handle_status
       st = @membership.map { |nid| { 'node_id' => nid, 'state' => state_of(nid) } }
-      { 'ok' => true, 'nodes' => st, 'files' => @metadata['files'].size }
+      { 'ok' => true, 'nodes' => st, 'files' => @metadata['files'].size,
+        'rereplications' => @rereplications, 'gc_deletes' => @gc_deletes }
     end
 
     # ---- Vivacidade (máquina de 3 estados, cálculo preguiçoso) --------------
@@ -259,7 +300,6 @@ module DFS
       { 'node_id' => node_id, 'host' => n['host'], 'port' => n['port'] }
     end
 
-    # Chunks que os metadados esperam que `node_id` guarde.
     def expected_chunks_for(node_id)
       set = Set.new
       @metadata['files'].each_value do |e|
@@ -284,8 +324,6 @@ module DFS
       end
     end
 
-    # Detecta transições p/ DEAD e restaura o fator de replicação dos chunks que
-    # perderam réplica, copiando de uma réplica viva para um nó de destino.
     def detect_and_heal
       transitions = []
       @mutex.synchronize do
@@ -299,7 +337,6 @@ module DFS
 
       transitions.each { |nid| log "detectada MORTE de #{nid}: iniciando re-replicação" }
 
-      # Para cada chunk que tinha réplica num nó morto, restaura RF.
       work = []
       @mutex.synchronize do
         @metadata['files'].each do |path, e|
@@ -309,12 +346,11 @@ module DFS
             next if dead.empty?
 
             live = replica_ids.select { |rid| state_of(rid) != DEAD }
-            next if live.empty? # sem fonte viva, nada a fazer agora
+            next if live.empty?
 
             need = REPLICATION_FACTOR - live.size
             next if need <= 0
 
-            # Alvos: nós vivos da membership que ainda não têm o chunk.
             candidates = @membership.select { |m| state_of(m) != DEAD && !replica_ids.include?(m) }
             candidates.first(need).each do |target|
               work << { path: path, chunk: c, source: live.first, target: target }
@@ -335,10 +371,10 @@ module DFS
       return unless resp['ok']
 
       @mutex.synchronize do
-        # Substitui o nó morto pelo destino nos metadados do chunk.
         new_replicas = w[:chunk]['replicas'].reject { |r| state_of(r['node_id']) == DEAD }
         new_replicas << tgt
         w[:chunk]['replicas'] = new_replicas.uniq { |r| r['node_id'] }
+        @rereplications += 1
         persist_metadata
       end
       log "chunk #{w[:chunk]['chunk_id']} re-replicado #{w[:source]} -> #{w[:target]}"
