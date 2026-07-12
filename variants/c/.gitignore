@@ -4,3 +4,5 @@ benchmark/
 *.exe
 *.o
 *.bin
+
+*.err
