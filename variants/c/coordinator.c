@@ -33,6 +33,13 @@ static pair_t g_pending[4096]; static int g_npending = 0;
 typedef struct { char node[32]; char chunk[80]; int count; } suspect_t;
 static suspect_t g_suspect[4096]; static int g_nsuspect = 0;
 
+/* Telemetria: agregados por operação + contadores de eventos. */
+typedef struct { char op[16]; int count; double total, mn, mx; long bytes; } metric_t;
+static metric_t g_metrics[8]; static int g_nmetrics = 0;
+static int g_upload_counter = 0;   /* round-robin de ingress */
+static int g_rereplications = 0;
+static int g_gc_deletes = 0;
+
 static void coord_log(const char *msg) { printf("[coordenador] %s\n", msg); fflush(stdout); }
 
 /* ---- Registro de nós ---------------------------------------------------- */
@@ -194,6 +201,7 @@ static json_value *handle_heartbeat(json_value *req) {
             if (sp) { sp->count++; if (sp->count >= 2) json_arr_add(to_delete, json_new_str(cid)); }
         }
     }
+    g_gc_deletes += (int)to_delete->nitems;
     pthread_mutex_unlock(&g_lock);
 
     json_value *r = json_new_obj();
@@ -233,6 +241,20 @@ static json_value *handle_request_upload(json_value *req) {
         json_obj_set(c, "replicas", reps);
         json_arr_add(chunks_arr, c);
     }
+
+    /* Ingress: round-robin ENTRE os nós vivos (placement usa a canônica). */
+    char ingress_id[32] = "";
+    int nlive = 0;
+    for (int i = 0; i < g_nmembership; i++) if (!is_dead(g_membership[i])) nlive++;
+    if (insufficient < 0 && nlive > 0) {
+        int want = g_upload_counter++ % nlive, seen = 0;
+        for (int i = 0; i < g_nmembership; i++) {
+            if (is_dead(g_membership[i])) continue;
+            if (seen == want) { snprintf(ingress_id, sizeof(ingress_id), "%s", g_membership[i]); break; }
+            seen++;
+        }
+    }
+    json_value *ingress = ingress_id[0] ? addr_json(ingress_id) : NULL;
     pthread_mutex_unlock(&g_lock);
 
     if (insufficient >= 0) {
@@ -240,14 +262,16 @@ static json_value *handle_request_upload(json_value *req) {
         char m[96]; snprintf(m, sizeof(m), "replicas vivas insuficientes p/ quorum no chunk %d", insufficient);
         return resp_err(m);
     }
+    if (!ingress) { json_free(chunks_arr); return resp_err("nenhum no vivo para ingress"); }
 
-    char m[128]; snprintf(m, sizeof(m), "upload %s p/ %s: %d chunk(s) de %ld B", upload_id, json_get_str(req, "path"), num_chunks, chunk_size);
+    char m[160]; snprintf(m, sizeof(m), "upload %s p/ %s: %d chunk(s) de %ld B, ingress=%s", upload_id, json_get_str(req, "path"), num_chunks, chunk_size, ingress_id);
     coord_log(m);
     json_value *r = json_new_obj();
     json_obj_set(r, "ok", json_new_bool(1));
     json_obj_set(r, "upload_id", json_new_str(upload_id));
     json_obj_set(r, "chunk_size", json_new_num(chunk_size));
     json_obj_set(r, "num_chunks", json_new_num(num_chunks));
+    json_obj_set(r, "ingress", ingress);
     json_obj_set(r, "chunks", chunks_arr);
     return r;
 }
@@ -282,6 +306,7 @@ static json_value *handle_confirm_upload(json_value *req) {
     json_value *entry = json_new_obj();
     json_obj_set(entry, "num_chunks", json_new_num(in_chunks ? (double)in_chunks->nitems : 0));
     json_obj_set(entry, "chunk_size", json_new_num(json_get_int(req, "chunk_size")));
+    json_obj_set(entry, "size", json_new_num(json_get_int(req, "size")));
     json_obj_set(entry, "created_at", json_new_num(now_seconds()));
     json_value *chunks = json_new_arr();
     if (in_chunks) for (size_t i = 0; i < in_chunks->nitems; i++) json_arr_add(chunks, json_clone(in_chunks->items[i]));
@@ -305,27 +330,40 @@ static json_value *handle_request_download(json_value *req) {
 
     json_value *out_chunks = json_new_arr();
     json_value *chunks = json_get(entry, "chunks");
+    /* Contagem de chunks por nó vivo (para escolher o egress por localidade). */
+    char cnt_id[MAXN][32]; int cnt_val[MAXN]; int ncnt = 0;
     for (size_t c = 0; c < chunks->nitems; c++) {
         json_value *ch = chunks->items[c];
         json_value *reps = json_get(ch, "replicas");
-        json_value *live = json_new_arr();
-        for (size_t r = 0; r < reps->nitems; r++)
-            if (!is_dead(json_get_str(reps->items[r], "node_id")))
-                json_arr_add(live, json_clone(reps->items[r]));
-        json_value *chosen = live;
-        if (live->nitems == 0) { json_free(live); chosen = json_new_arr(); for (size_t r = 0; r < reps->nitems; r++) json_arr_add(chosen, json_clone(reps->items[r])); }
+        json_value *all = json_new_arr();
+        for (size_t r = 0; r < reps->nitems; r++) {
+            json_arr_add(all, json_clone(reps->items[r]));
+            const char *rid = json_get_str(reps->items[r], "node_id");
+            if (is_dead(rid)) continue;
+            int f = -1; for (int k = 0; k < ncnt; k++) if (strcmp(cnt_id[k], rid) == 0) { f = k; break; }
+            if (f < 0 && ncnt < MAXN) { f = ncnt++; snprintf(cnt_id[f], 32, "%s", rid); cnt_val[f] = 0; }
+            if (f >= 0) cnt_val[f]++;
+        }
         json_value *oc = json_new_obj();
         json_obj_set(oc, "index", json_new_num(json_get_int(ch, "index")));
         json_obj_set(oc, "chunk_id", json_new_str(json_get_str(ch, "chunk_id")));
-        json_obj_set(oc, "replicas", chosen);
+        json_obj_set(oc, "replicas", all);
         json_arr_add(out_chunks, oc);
     }
     long num = json_get_int(entry, "num_chunks");
+    /* Egress = nó vivo com mais chunks do arquivo. */
+    char egress_id[32] = ""; int best = -1;
+    for (int k = 0; k < ncnt; k++) if (cnt_val[k] > best) { best = cnt_val[k]; snprintf(egress_id, 32, "%s", cnt_id[k]); }
+    json_value *egress = egress_id[0] ? addr_json(egress_id) : NULL;
     pthread_mutex_unlock(&g_lock);
 
+    if (!egress) { json_free(out_chunks); return resp_err("nenhuma replica viva para servir o download"); }
+    char m[160]; snprintf(m, sizeof(m), "download %s: egress=%s (%d de %ld chunks locais)", path, egress_id, best, num);
+    coord_log(m);
     json_value *r = json_new_obj();
     json_obj_set(r, "ok", json_new_bool(1));
     json_obj_set(r, "num_chunks", json_new_num(num));
+    json_obj_set(r, "egress", egress);
     json_obj_set(r, "chunks", out_chunks);
     return r;
 }
@@ -396,6 +434,7 @@ static json_value *handle_list_files(void) {
         json_value *fo = json_new_obj();
         json_obj_set(fo, "path", json_new_str(files->members[i].key));
         json_obj_set(fo, "num_chunks", json_new_num(json_get_int(entry, "num_chunks")));
+        json_obj_set(fo, "size", json_new_num(json_get_int(entry, "size")));
         json_obj_set(fo, "nodes", nodes);
         json_arr_add(arr, fo);
     }
@@ -416,10 +455,56 @@ static json_value *handle_status(void) {
         json_arr_add(arr, o);
     }
     int nfiles = (int)meta_files()->nmembers;
+    int rr = g_rereplications, gc = g_gc_deletes;
     pthread_mutex_unlock(&g_lock);
     json_value *r = json_new_obj();
     json_obj_set(r, "ok", json_new_bool(1));
     json_obj_set(r, "nodes", arr);
+    json_obj_set(r, "files", json_new_num(nfiles));
+    json_obj_set(r, "rereplications", json_new_num(rr));
+    json_obj_set(r, "gc_deletes", json_new_num(gc));
+    return r;
+}
+
+/* METRIC: um nó ingress/egress reporta a duração e o volume de uma operação. */
+static json_value *handle_metric(json_value *req) {
+    const char *op = json_get_str(req, "metric");
+    double dur = 0; json_value *dv = json_get(req, "duration"); if (dv && dv->type == JSON_NUM) dur = dv->num;
+    long bytes = json_get_int(req, "bytes");
+    pthread_mutex_lock(&g_lock);
+    metric_t *mp = NULL;
+    for (int i = 0; i < g_nmetrics; i++) if (strcmp(g_metrics[i].op, op) == 0) { mp = &g_metrics[i]; break; }
+    if (!mp && g_nmetrics < 8) { mp = &g_metrics[g_nmetrics++]; snprintf(mp->op, 16, "%s", op); mp->count = 0; mp->total = 0; mp->mn = -1; mp->mx = 0; mp->bytes = 0; }
+    if (mp) {
+        mp->count++; mp->total += dur; mp->bytes += bytes;
+        if (mp->mn < 0 || dur < mp->mn) mp->mn = dur;
+        if (dur > mp->mx) mp->mx = dur;
+    }
+    pthread_mutex_unlock(&g_lock);
+    json_value *r = json_new_obj(); json_obj_set(r, "ok", json_new_bool(1)); return r;
+}
+
+static json_value *handle_metrics(void) {
+    pthread_mutex_lock(&g_lock);
+    json_value *ops = json_new_obj();
+    for (int i = 0; i < g_nmetrics; i++) {
+        metric_t *m = &g_metrics[i];
+        double avg = m->count ? m->total / m->count : 0;
+        json_value *o = json_new_obj();
+        json_obj_set(o, "count", json_new_num(m->count));
+        json_obj_set(o, "avg_ms", json_new_num(avg * 1000));
+        json_obj_set(o, "min_ms", json_new_num((m->mn < 0 ? 0 : m->mn) * 1000));
+        json_obj_set(o, "max_ms", json_new_num(m->mx * 1000));
+        json_obj_set(o, "bytes", json_new_num((double)m->bytes));
+        json_obj_set(ops, m->op, o);
+    }
+    int nfiles = (int)meta_files()->nmembers, rr = g_rereplications, gc = g_gc_deletes;
+    pthread_mutex_unlock(&g_lock);
+    json_value *r = json_new_obj();
+    json_obj_set(r, "ok", json_new_bool(1));
+    json_obj_set(r, "ops", ops);
+    json_obj_set(r, "rereplications", json_new_num(rr));
+    json_obj_set(r, "gc_deletes", json_new_num(gc));
     json_obj_set(r, "files", json_new_num(nfiles));
     return r;
 }
@@ -433,6 +518,8 @@ static json_value *coord_handler(json_value *req) {
     if (strcmp(op, "REQUEST_DOWNLOAD") == 0) return handle_request_download(req);
     if (strcmp(op, "DELETE_FILE") == 0)      return handle_delete_file(req);
     if (strcmp(op, "LIST_FILES") == 0)       return handle_list_files();
+    if (strcmp(op, "METRIC") == 0)           return handle_metric(req);
+    if (strcmp(op, "METRICS") == 0)          return handle_metrics();
     if (strcmp(op, "STATUS") == 0)           return handle_status();
     return resp_err("op desconhecida");
 }
@@ -458,6 +545,7 @@ static void update_after_replicate(const char *path, const char *chunk_id, const
             if (!has) json_arr_add(nr, addr_json(target));
             json_obj_set(chunks->items[c], "replicas", nr);
         }
+        g_rereplications++;
         persist_meta();
     }
     pthread_mutex_unlock(&g_lock);

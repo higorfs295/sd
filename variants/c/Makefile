@@ -15,7 +15,7 @@ else
   EXT    =
 endif
 
-BINS = coordinator$(EXT) node$(EXT) client$(EXT)
+BINS = coordinator$(EXT) node$(EXT) client$(EXT) test_unit$(EXT)
 
 all: $(BINS)
 
@@ -27,6 +27,9 @@ node$(EXT): node.c $(COMMON)
 
 client$(EXT): client.c $(COMMON)
 	$(CC) $(CFLAGS) -o $@ client.c $(COMMON) $(LIBS)
+
+test_unit$(EXT): test_unit.c $(COMMON)
+	$(CC) $(CFLAGS) -o $@ test_unit.c $(COMMON) $(LIBS)
 
 clean:
 	rm -f $(BINS)

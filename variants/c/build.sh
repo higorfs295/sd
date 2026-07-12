@@ -22,4 +22,5 @@ echo "compilando com $CC"
 "$CC" $CFLAGS -o "coordinator$EXT" coordinator.c $COMMON $LIBS
 "$CC" $CFLAGS -o "node$EXT"        node.c        $COMMON $LIBS
 "$CC" $CFLAGS -o "client$EXT"      client.c      $COMMON $LIBS
-echo "ok: coordinator$EXT, node$EXT, client$EXT"
+"$CC" $CFLAGS -o "test_unit$EXT"   test_unit.c   $COMMON $LIBS
+echo "ok: coordinator$EXT, node$EXT, client$EXT, test_unit$EXT"

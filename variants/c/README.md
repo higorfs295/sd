@@ -15,37 +15,38 @@ GFS/HDFS), adaptando apenas a *stack* de transporte.
 | Aspecto | Original (Python) | Esta variante (C) |
 |---|---|---|
 | Arquitetura | Coordenador + nós + CLI, controle/dados separados | **Idêntica** |
-| Transporte de controle | gRPC unário | JSON por linha sobre TCP (sockets BSD/Winsock) |
-| Transporte de dados | gRPC streaming | JSON por linha sobre TCP; bytes em base64 |
+| **Cliente fraco + gateway** | Cliente entrega ao **ingress**; **egress** remonta | **Idêntico** (o cliente não fatia nada) |
+| Transporte | gRPC (unário + streaming) | JSON por linha sobre TCP (Winsock/BSD); bytes em base64 |
 | Mensageria de cura | Apache Kafka | RPC de controle direto (`REPLICATE`) — mesmo papel |
-| JSON | biblioteca | mini-parser próprio (`json.c`) |
-| Metadados | JSON em disco | **Idêntico** (JSON em `data/metadata`) |
-| Placement | Round-robin determinístico persistido | **Idêntico** (`replicas_for_chunk`) |
-| Chunking adaptável | `chunking.py` | **Idêntico** (`choose_chunk_size`) |
+| **Telemetria** | Consumidor Kafka (`telemetry_hub.py`) | Coordenador agrega métricas; `client telemetry` ao vivo |
+| Metadados | JSON em disco | **Idêntico** (mini-parser JSON próprio) |
+| Placement / Chunking | determinístico / adaptável | **Idênticos** (`replicas_for_chunk`, `choose_chunk_size`) |
 | Quórum de escrita | 2 de 3 | **Idêntico** |
-| Heartbeat 3 estados | ALIVE/SUSPECT/DEAD preguiçoso | **Idêntico** |
-| Re-replicação, GC, elasticidade | Sim | **Sim** |
-| Concorrência | threads Python | pthreads (uma thread por conexão) |
+| Heartbeat 3 estados / Re-replicação / GC / Elasticidade | Sim | **Sim** |
+| Benchmark / testes | `benchmark_harness.py`, testes | `client benchmark`, `test_unit`, `client test-integrity` |
 
-A comunicação usa apenas a biblioteca-padrão de C mais os sockets do sistema
-(Winsock no Windows, BSD sockets em POSIX) e pthreads — **sem gRPC, sem Kafka,
-sem dependências externas**.
+Sem dependências externas: apenas Winsock/BSD sockets, pthreads e um mini-parser
+JSON próprio (`json.c`). Sem gRPC, sem Kafka.
 
 ---
 
-## 2. Arquitetura
+## 2. Arquitetura e o modelo ingress/egress
+
+O cliente é **fraco**: não fatia arquivos nem decide posicionamento. Faz duas
+conversas por operação — controle com o coordenador e dados com um **gateway**:
 
 ```
-            plano de CONTROLE (metadados leves)
-   CLI  <───────────────────────────────────►  COORDENADOR (coordinator.c)
-    │        REQUEST_UPLOAD / CONFIRM /            - registro de nós + vivacidade
-    │        REQUEST_DOWNLOAD / LIST / DELETE      - placement determinístico
-    │        + REGISTER / HEARTBEAT (dos nós)      - metadados (JSON)
-    │                                             - supervisor de re-replicação
-    │  plano de DADOS (bytes dos arquivos)         - garbage collection
-    └──────────────►  NÓS DE ARMAZENAMENTO  ◄─────► NÓS (fan-out entre si)
-         STORE / FETCH / DELETE / LIST / REPLICATE   (node.c)
+   PUT:  client --RequestUpload--> COORDENADOR  (devolve plano + INGRESS vivo)
+         client --arquivo inteiro--> INGRESS --fatia+replica c/ quórum--> réplicas
+                                     INGRESS --ConfirmUpload--> COORDENADOR
+
+   GET:  client --RequestDownload--> COORDENADOR (devolve mapa + EGRESS por localidade)
+         client --pede arquivo--> EGRESS --lê local + FETCH em peers--> client
 ```
+
+- **Ingress**: escolhido entre os nós **vivos** (round-robin por arquivo). Recebe
+  o arquivo, fatia, grava/replica com **quórum 2/3** e **confirma** ao coordenador.
+- **Egress**: o nó **vivo com mais chunks** do arquivo (localidade). Remonta e devolve.
 
 ---
 
@@ -53,21 +54,20 @@ sem dependências externas**.
 
 | Arquivo | Papel | Equivalente no original |
 |---|---|---|
-| `json.h` / `json.c` | Mini-parser/serializador JSON | (Protobuf/gRPC) |
-| `dfs_common.h` / `dfs_common.c` | Config, sockets, RPC, base64, placement, chunking | `config.py` + camada gRPC + `placement.py` + `chunking.py` |
-| `coordinator.c` | Plano de controle | `server.py` + `node_registry.py` + `metadata_service.py` + `replication_watcher.py` |
-| `node.c` | Plano de dados | `storage_node.py` + `data_service.py` + `local_storage.py` |
-| `client.c` | CLI put/get/list/rm/status | `cli.py` + `client.py` |
+| `dfs_common.h/.c` | Config, sockets, RPC, base64, placement, chunking | `config.py` + camada gRPC + `placement.py` + `chunking.py` |
+| `json.h/.c` | Mini-parser/serializador JSON | (Protobuf) |
+| `coordinator.c` | Controle + ingress/egress + telemetria | `server.py` + `node_registry.py` + `metadata_service.py` + `replication_watcher.py` |
+| `node.c` | Dados (ingress/egress, fan-out, réplica) | `storage_node.py` + `data_service.py` + `local_storage.py` |
+| `client.c` | CLI put/get/list/rm/status/metrics/telemetry/benchmark/test-integrity | `cli.py` + `client.py` + `benchmark_harness.py` + `telemetry_hub.py` |
+| `test_unit.c` | Testes de placement/chunking | `test_chunking.py` |
 | `run_cluster.sh` | Orquestrador do cluster | `run_cluster.py` |
-| `build.sh` / `Makefile` | Compilação | — |
 
 ---
 
 ## 4. Pré-requisitos
 
-Um compilador C (C11) com pthreads. No Windows, o **MSYS2/MinGW-w64** (gcc) é o
-caminho recomendado; em Linux/macOS, o gcc/clang do sistema. Nenhuma biblioteca
-externa.
+Um compilador C (GCC/Clang/MinGW). No Windows, usa-se o **MSYS2/MinGW-w64**
+(`gcc`), que já traz Winsock e pthreads. Sem dependências externas.
 
 ---
 
@@ -75,14 +75,11 @@ externa.
 
 ```
 cd variants/c
-./build.sh          # detecta o gcc do MSYS2/MinGW automaticamente
+bash build.sh        # detecta o gcc do MSYS2/MinGW e gera os binários
 # ou:  make
 ```
 
-Gera `coordinator`, `node` e `client` (com sufixo `.exe` no Windows).
-
-> No Windows, garanta que a pasta `C:\msys64\mingw64\bin` esteja no PATH ao
-> **executar** os binários (eles dependem das DLLs do runtime MinGW).
+Gera `coordinator`, `node`, `client` e `test_unit` (com sufixo `.exe` no Windows).
 
 ---
 
@@ -91,52 +88,47 @@ Gera `coordinator`, `node` e `client` (com sufixo `.exe` no Windows).
 ### 6.1. Subir o cluster (coordenador + 5 nós)
 
 ```
-./run_cluster.sh
+bash run_cluster.sh     # compila se necessário e sobe tudo; Ctrl+C encerra
 ```
 
-Sobe o coordenador (porta 9100) e os cinco nós (portas 9101–9105) como processos
-independentes. `Ctrl+C` encerra tudo.
-
-### 6.2. Usar a CLI (em outro terminal)
+### 6.2. CLI (em outro terminal)
 
 ```
-./client put <arquivo_local> <caminho_dfs>
-./client get <caminho_dfs> <arquivo_local>
+./client put <arquivo_local> <caminho_dfs>   # entrega ao ingress
+./client get <caminho_dfs> <arquivo_local>   # recebe do egress
 ./client list
 ./client rm  <caminho_dfs>
 ./client status
+./client metrics
+./client telemetry                            # hub de telemetria ao vivo
 ```
 
 ---
 
 ## 7. Como validar os requisitos
 
-**Correção (integridade byte a byte).** Envie e baixe um arquivo e compare os
-bytes — devem ser idênticos.
-
-**Tolerância a falhas + re-replicação.** Com o cluster no ar e um arquivo
-enviado, mate um dos processos de nó (portas 9101–9105). Em ~10–14 s o
-coordenador marca o nó como `DEAD` (`./client status`), a re-replicação restaura
-o fator 3 em nós vivos, e o `get` continua devolvendo o arquivo íntegro.
-
-**Escalabilidade / elasticidade.** Suba um nó extra em runtime:
-
 ```
-./node node6 9106 data/nodes/node6
+./test_unit                       # placement + chunking (sem cluster)
+./client test-integrity 4         # PUT/GET + comparação byte a byte (com cluster)
+./client benchmark --sizes 1 2 5 --iter 3   # CSV em benchmark/resultados.csv
 ```
+
+- **Tolerância a falhas + re-replicação**: com um arquivo enviado, mate um nó
+  (portas 9101–9105); em ~10–14 s ele fica `DEAD` (`./client status`), a
+  re-replicação restaura o fator 3, o `get` segue íntegro (servido por um egress
+  vivo) e o contador de re-replicações sobe.
+- **Escalabilidade / elasticidade**: `./node node6 9106 data/nodes/node6`.
 
 ---
 
 ## 8. Decisões de projeto preservadas
 
-- **Separação controle/dados**: o coordenador só troca metadados; os bytes fluem
-  direto entre CLI e nós.
-- **Placement determinístico e persistido**: chunk `i` → nós `i, i+1, i+2 (mod N)`,
-  decidido uma vez e gravado nos metadados; nunca recalculado.
-- **Quórum de escrita (2/3)**: durabilidade garantida no `confirm`.
-- **Consistência eventual**: re-replicação restaura réplicas perdidas; a coleta de
-  órfãos (block report no heartbeat, confirmada em 2 ciclos) remove cópias redundantes.
-- **Coordenador único**: modelo GFS/HDFS v1; recuperação relendo o índice persistido.
+- **Separação controle/dados** e **cliente fraco**: o coordenador só troca
+  metadados; o ingress orquestra a escrita, o egress a leitura.
+- **Placement determinístico e persistido**: chunk `i` → nós `i, i+1, i+2 (mod N)`.
+- **Quórum de escrita (2/3)** no fan-out do ingress.
+- **Consistência eventual**: re-replicação + coleta de órfãos (2 ciclos).
+- **Coordenador único**: modelo GFS/HDFS v1; recuperação relendo o índice.
 
 Para o detalhamento conceitual completo, consulte o `README.md` e o
 `ARQUITETURA.md` do projeto original em Python.
