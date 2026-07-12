@@ -1,3 +1,6 @@
 data/
 run/
+benchmark/
+.tmp_integ/
+.tmp_bench/
 *.bin

@@ -32,6 +32,11 @@ declare -A PENDING       # node -> csv de chunk_ids pendentes de deleção
 declare -A SUSPECT       # "node|chunk" -> contagem de ciclos como órfão
 declare -A PREV_STATE    # node -> estado anterior (p/ detectar transições)
 declare -A INFLIGHT      # upload_id -> expiração (protege upload em andamento do GC)
+# Telemetria: agregados por operação (duração em ms, inteiros) + contadores.
+declare -A M_COUNT M_SUM M_MIN M_MAX M_BYTES
+INGRESS_COUNTER=0        # round-robin de ingress entre nós vivos
+REREPLICATIONS=0
+GC_DELETES=0
 MEMBERSHIP=($(node_list))
 for _n in "${MEMBERSHIP[@]}"; do PREV_STATE["$_n"]=DEAD; done
 LAST_WATCH=0
@@ -104,6 +109,7 @@ coord_handle() {
           [ -n "${current_orphans[${k#*|}]:-}" ] || unset 'SUSPECT[$k]'
         done
       fi
+      if [ -n "$out_del" ]; then IFS=',' read -ra _dd <<< "$out_del"; GC_DELETES=$((GC_DELETES + ${#_dd[@]})); fi
       echo "status=OK"; echo "delete=$out_del" ;;
 
     REQUEST_UPLOAD)
@@ -125,18 +131,28 @@ coord_handle() {
         lines+="CHUNK $i ${up}_chunk_${i} $csv"$'\n'
       done
       if [ -n "$bad" ]; then echo "status=ERR"; echo "error=replicas vivas insuficientes p/ quorum no chunk $bad"; return; fi
-      clog "upload $up p/ $path: $num chunk(s) de $cs B"
-      echo "status=OK"; echo "upload_id=$up"; echo "chunk_size=$cs"; echo "num_chunks=$num"
+
+      # Ingress: round-robin ENTRE os nós vivos (o placement usa a canônica).
+      local live_nodes=() m
+      for m in "${MEMBERSHIP[@]}"; do is_dead "$m" || live_nodes+=("$m"); done
+      if [ ${#live_nodes[@]} -eq 0 ]; then echo "status=ERR"; echo "error=nenhum no vivo para ingress"; return; fi
+      local ingress="${live_nodes[$((INGRESS_COUNTER % ${#live_nodes[@]}))]}"
+      INGRESS_COUNTER=$((INGRESS_COUNTER + 1))
+
+      clog "upload $up p/ $path: $num chunk(s) de $cs B, ingress=$ingress"
+      echo "status=OK"; echo "upload_id=$up"; echo "chunk_size=$cs"; echo "num_chunks=$num"; echo "ingress=$ingress"
       printf '%s' "$lines" ;;
 
     CONFIRM_UPLOAD)
       dfs_field "$req" path; path="$FIELD"
       dfs_field "$req" chunk_size; local cs="$FIELD"
+      dfs_field "$req" size; local sz="$FIELD"
       local mf="$META/files/$(enc_path "$path")"
       {
         echo "path=$path"
         echo "num_chunks=$(grep -c '^CHUNK ' "$req")"
         echo "chunk_size=$cs"
+        echo "size=${sz:-0}"
         grep '^CHUNK ' "$req"
       } > "$mf"
       # Upload concluído: libera a proteção contra o GC.
@@ -149,15 +165,26 @@ coord_handle() {
       dfs_field "$req" path; path="$FIELD"
       local mf="$META/files/$(enc_path "$path")"
       if [ ! -f "$mf" ]; then echo "status=ERR"; echo "error=arquivo nao encontrado"; return; fi
-      dfs_field "$mf" num_chunks; echo "status=OK"; echo "num_chunks=$FIELD"
-      local _ idx cid reps
+      dfs_field "$mf" num_chunks; local nc="$FIELD"
+      # Monta as linhas de chunk e conta chunks por nó vivo (p/ o egress).
+      local out_lines="" _ idx cid reps r
+      local -A locality=()
       while read -r _ idx cid reps; do
-        local live="" r
+        local live=""
         IFS=',' read -ra rr <<< "$reps"
-        for r in "${rr[@]}"; do is_dead "$r" || live="${live:+$live,}$r"; done
+        for r in "${rr[@]}"; do
+          if ! is_dead "$r"; then live="${live:+$live,}$r"; locality["$r"]=$(( ${locality[$r]:-0} + 1 )); fi
+        done
         [ -z "$live" ] && live="$reps"
-        echo "CHUNK $idx $cid $live"
-      done < <(grep '^CHUNK ' "$mf") ;;
+        out_lines+="CHUNK $idx $cid $live"$'\n'
+      done < <(grep '^CHUNK ' "$mf")
+      # Egress por LOCALIDADE: o nó vivo com mais chunks do arquivo.
+      local egress="" bestc=-1
+      for r in "${!locality[@]}"; do [ "${locality[$r]}" -gt "$bestc" ] && { bestc="${locality[$r]}"; egress="$r"; }; done
+      if [ -z "$egress" ]; then echo "status=ERR"; echo "error=nenhuma replica viva para servir o download"; return; fi
+      clog "download $path: egress=$egress ($bestc de $nc chunks locais)"
+      echo "status=OK"; echo "num_chunks=$nc"; echo "egress=$egress"
+      printf '%s' "$out_lines" ;;
 
     DELETE_FILE)
       dfs_field "$req" path; path="$FIELD"
@@ -184,14 +211,15 @@ coord_handle() {
       local mf
       for mf in "$META/files/"*; do
         [ -f "$mf" ] || continue
-        local fpath nc nodes="" _ idx cid reps r
+        local fpath nc sz nodes="" _ idx cid reps r
         dfs_field "$mf" path; fpath="$FIELD"
         dfs_field "$mf" num_chunks; nc="$FIELD"
+        dfs_field "$mf" size; sz="${FIELD:-0}"
         while read -r _ idx cid reps; do
           IFS=',' read -ra rr <<< "$reps"
           for r in "${rr[@]}"; do [[ ",$nodes," == *",$r,"* ]] || nodes="${nodes:+$nodes,}$r"; done
         done < <(grep '^CHUNK ' "$mf")
-        echo "FILE $fpath $nc $nodes"
+        echo "FILE $fpath $nc $sz $nodes"
       done ;;
 
     STATUS)
@@ -199,7 +227,30 @@ coord_handle() {
       local n cnt=0 mf
       for n in "${MEMBERSHIP[@]}"; do state_of "$n"; echo "NODE $n $ST"; done
       for mf in "$META/files/"*; do [ -f "$mf" ] && cnt=$((cnt + 1)); done
-      echo "files=$cnt" ;;
+      echo "files=$cnt"; echo "rereplications=$REREPLICATIONS"; echo "gc_deletes=$GC_DELETES" ;;
+
+    METRIC)
+      # Um nó ingress/egress reporta duração (ms, inteiro) e volume de uma operação.
+      local mop dur bytes
+      dfs_field "$req" metric; mop="$FIELD"
+      dfs_field "$req" duration_ms; dur="${FIELD:-0}"
+      dfs_field "$req" bytes; bytes="${FIELD:-0}"
+      M_COUNT["$mop"]=$(( ${M_COUNT[$mop]:-0} + 1 ))
+      M_SUM["$mop"]=$(( ${M_SUM[$mop]:-0} + dur ))
+      M_BYTES["$mop"]=$(( ${M_BYTES[$mop]:-0} + bytes ))
+      if [ -z "${M_MIN[$mop]:-}" ] || [ "$dur" -lt "${M_MIN[$mop]}" ]; then M_MIN["$mop"]=$dur; fi
+      if [ -z "${M_MAX[$mop]:-}" ] || [ "$dur" -gt "${M_MAX[$mop]}" ]; then M_MAX["$mop"]=$dur; fi
+      echo "status=OK" ;;
+
+    METRICS)
+      echo "status=OK"
+      local cnt=0 mf mop
+      for mf in "$META/files/"*; do [ -f "$mf" ] && cnt=$((cnt + 1)); done
+      echo "files=$cnt"; echo "rereplications=$REREPLICATIONS"; echo "gc_deletes=$GC_DELETES"
+      for mop in "${!M_COUNT[@]}"; do
+        local c="${M_COUNT[$mop]}" avg=$(( ${M_SUM[$mop]} / (${M_COUNT[$mop]} > 0 ? ${M_COUNT[$mop]} : 1) ))
+        echo "OP $mop $c $avg ${M_MIN[$mop]:-0} ${M_MAX[$mop]:-0} ${M_BYTES[$mop]:-0}"
+      done ;;
 
     *)
       echo "status=ERR"; echo "error=op desconhecida: $op" ;;
@@ -242,6 +293,7 @@ watcher_pass() {
           local newcsv="${live:+$live,}$t"
           set_chunk_replicas "$mf" "$cid" "$newcsv"
           live="$newcsv"; reps="$newcsv"
+          REREPLICATIONS=$((REREPLICATIONS + 1))
           clog "chunk $cid re-replicado $source -> $t"
           need=$((need - 1))
         fi

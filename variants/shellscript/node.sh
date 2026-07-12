@@ -34,6 +34,13 @@ local_chunks_csv() {
   LC="$out"
 }
 
+# Telemetria: reporta a duração (ms) e o volume de uma operação ao coordenador.
+emit_metric() {
+  local metric="$1" start="$2" bytes="$3" dur_ms
+  dur_ms="$(awk "BEGIN{printf \"%d\", ($EPOCHREALTIME - $start) * 1000}")"
+  printf 'op=METRIC\nmetric=%s\nduration_ms=%s\nbytes=%s\n' "$metric" "$dur_ms" "$bytes" | dfs_rpc coordinator >/dev/null 2>&1 || true
+}
+
 # ---- Handler das operações do plano de dados --------------------------------
 node_handle() {
   local req="$1" reqid="$2" server="$3" op
@@ -42,6 +49,77 @@ node_handle() {
   case "$op" in
     PING)
       echo "status=OK"; echo "node_id=$NODE_ID" ;;
+
+    UPLOAD_FILE)
+      # Papel de INGRESS: recebe o arquivo inteiro + o plano, fatia, grava/replica
+      # com quórum e confirma ao coordenador. Espelha DataServicer.UploadFile.
+      local path upload_id chunk_size datapath start="$EPOCHREALTIME"
+      dfs_field "$req" path; path="$FIELD"
+      dfs_field "$req" upload_id; upload_id="$FIELD"
+      dfs_field "$req" chunk_size; chunk_size="$FIELD"
+      dfs_field "$req" data; datapath="$FIELD"
+      local total; total="$(wc -c < "$datapath")"
+      local conf="" failed="" _ idx cid reps
+      while read -r _ idx cid reps; do
+        local tmpc="$SPOOL/up_${reqid}_${idx}"
+        dd if="$datapath" bs="$chunk_size" skip="$idx" count=1 of="$tmpc" 2>/dev/null
+        local self_rep=0 r
+        IFS=',' read -ra rr <<< "$reps"
+        for r in "${rr[@]}"; do [ "$r" = "$NODE_ID" ] && self_rep=1; done
+        [ "$self_rep" = 1 ] && cp "$tmpc" "$CHUNKS/$cid"
+        local actual="" count=0 resp
+        for r in "${rr[@]}"; do
+          [ -z "$r" ] && continue
+          if [ "$r" = "$NODE_ID" ]; then
+            [ "$self_rep" = 1 ] && { actual="${actual:+$actual,}$r"; count=$((count + 1)); }
+          else
+            resp="$(printf 'op=STORE\nchunk_id=%s\nprimary=0\ndata=%s\n' "$cid" "$tmpc" | dfs_rpc "$r")"
+            dfs_field_str "$resp" status
+            [ "$FIELD" = "OK" ] && { actual="${actual:+$actual,}$r"; count=$((count + 1)); } || nlog "fan-out falhou p/ $r"
+          fi
+        done
+        rm -f "$tmpc"
+        local q=$WRITE_QUORUM; [ "${#rr[@]}" -lt "$q" ] && q=${#rr[@]}
+        if [ "$count" -lt "$q" ]; then failed="$idx"; break; fi
+        conf+="CHUNK $idx $cid $actual"$'\n'
+      done < <(grep '^CHUNK ' "$req")
+
+      if [ -n "$failed" ]; then echo "status=ERR"; echo "error=quorum nao atingido no chunk $failed"; return; fi
+      # O INGRESS confirma ao coordenador (cliente fraco não confirma).
+      { printf 'op=CONFIRM_UPLOAD\npath=%s\nchunk_size=%s\nsize=%s\ningress=%s\n' "$path" "$chunk_size" "$total" "$NODE_ID"
+        printf '%s' "$conf"; } | dfs_rpc coordinator >/dev/null
+      emit_metric upload "$start" "$total"
+      local nch; nch="$(grep -c '^CHUNK ' "$req")"
+      nlog "ingress: $path ($nch chunk(s), $total B) confirmado"
+      echo "status=OK"; echo "chunks_written=$nch"; echo "bytes=$total" ;;
+
+    DOWNLOAD_FILE)
+      # Papel de EGRESS: reúne os chunks (locais + buscados em peers) e devolve o
+      # arquivo montado. Espelha DataServicer.DownloadFile.
+      local start="$EPOCHREALTIME" outp="$RUN/$server/out/$reqid.resp.data"
+      : > "$outp"
+      local _ idx cid reps missing="" r
+      while read -r _ idx cid reps; do
+        if [ -f "$CHUNKS/$cid" ]; then
+          cat "$CHUNKS/$cid" >> "$outp"
+        else
+          local got=0 resp dp
+          IFS=',' read -ra rr <<< "$reps"
+          for r in "${rr[@]}"; do
+            [ "$r" = "$NODE_ID" ] && continue
+            resp="$(printf 'op=FETCH\nchunk_id=%s\n' "$cid" | dfs_rpc "$r")"
+            dfs_field_str "$resp" status
+            if [ "$FIELD" = "OK" ]; then dfs_field_str "$resp" data; dp="$FIELD"; cat "$dp" >> "$outp"; got=1; break; fi
+          done
+          [ "$got" = 0 ] && { missing="$idx"; break; }
+        fi
+      done < <(grep '^CHUNK ' "$req")
+
+      if [ -n "$missing" ]; then echo "status=ERR"; echo "error=chunk $missing indisponivel"; return; fi
+      local total; total="$(wc -c < "$outp")"
+      emit_metric download "$start" "$total"
+      nlog "egress: servindo arquivo ($total B)"
+      echo "status=OK"; echo "data=$outp"; echo "bytes=$total" ;;
 
     STORE)
       local chunk_id primary datapath
