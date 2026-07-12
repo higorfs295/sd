@@ -40,7 +40,9 @@ public class StorageNode
         return Protocol.Str(req, "op") switch
         {
             "PING" => new JsonObject { ["ok"] = true, ["node_id"] = _nodeId },
-            "STORE" => HandleStore(req),
+            "UPLOAD_FILE" => HandleUploadFile(req),     // papel de ingress
+            "DOWNLOAD_FILE" => HandleDownloadFile(req), // papel de egress
+            "STORE" => HandleStore(req),                // fan-out entre nós
             "FETCH" => HandleFetch(req),
             "DELETE" => HandleDelete(req),
             "LIST" => new JsonObject { ["ok"] = true, ["chunks"] = ToJsonArray(LocalChunks()) },
@@ -49,49 +51,128 @@ public class StorageNode
         };
     }
 
-    // STORE grava um chunk. Se `primary` for true, este nó atua como gateway:
-    // grava local e replica aos demais (fanout), exigindo o quórum de escrita.
-    private JsonObject HandleStore(JsonObject req)
+    // ---- Papel de INGRESS (UPLOAD_FILE) -------------------------------------
+    // Recebe o arquivo inteiro + o plano; fatia, grava/replica com quórum e
+    // confirma ao coordenador. Espelha DataServicer.UploadFile do original.
+    private JsonObject HandleUploadFile(JsonObject req)
     {
-        var chunkId = Protocol.Str(req, "chunk_id");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         var data = Protocol.DecodeBytes(Protocol.Str(req, "data"));
-        WriteChunk(chunkId, data);
+        long chunkSize = Protocol.Long(req, "chunk_size");
+        var plan = (JsonArray)req["chunks"]!;
+        var confirmed = new JsonArray();
 
-        if (!Protocol.Bool(req, "primary"))
-            return new JsonObject { ["ok"] = true, ["stored_on"] = new JsonArray(_nodeId) };
-
-        var storedOn = new List<string> { _nodeId };
-        if (req["fanout"] is JsonArray fanout)
+        foreach (var cn in plan.Cast<JsonObject>().OrderBy(c => Protocol.Int(c, "index")))
         {
-            foreach (var item in fanout)
-            {
-                var r = (JsonObject)item!;
-                if (Protocol.Str(r, "node_id") == _nodeId) continue;
-                try
-                {
-                    var resp = Protocol.Request(Protocol.Str(r, "host"), Protocol.Int(r, "port"),
-                        new JsonObject
-                        {
-                            ["op"] = "STORE", ["chunk_id"] = chunkId,
-                            ["data"] = Protocol.Str(req, "data"), ["primary"] = false
-                        });
-                    if (Protocol.Bool(resp, "ok")) storedOn.Add(Protocol.Str(r, "node_id"));
-                }
-                catch (Exception e)
-                {
-                    Log($"fan-out falhou p/ {Protocol.Str(r, "node_id")}: {e.Message}");
-                }
-            }
+            int i = Protocol.Int(cn, "index");
+            var chunkId = Protocol.Str(cn, "chunk_id");
+            long offset = (long)i * chunkSize;
+            int len = (int)Math.Max(0, Math.Min(chunkSize, data.LongLength - offset));
+            var slice = new byte[len];
+            if (len > 0) Array.Copy(data, offset, slice, 0, len);
+
+            var replicas = (JsonArray)cn["replicas"]!;
+            // grava local se este nó é uma das réplicas
+            if (replicas.Cast<JsonObject>().Any(r => Protocol.Str(r, "node_id") == _nodeId))
+                WriteChunk(chunkId, slice);
+            // fan-out às demais réplicas, exigindo quórum
+            var stored = FanOut(chunkId, slice, replicas);
+            if (stored.Count < Math.Min(Config.WriteQuorum, replicas.Count))
+                return new JsonObject { ["ok"] = false, ["error"] = $"quórum não atingido no chunk {i}" };
+
+            var actual = new JsonArray();
+            foreach (var r in replicas.Cast<JsonObject>())
+                if (stored.Contains(Protocol.Str(r, "node_id"))) actual.Add(r.DeepClone());
+            confirmed.Add(new JsonObject { ["index"] = i, ["chunk_id"] = chunkId, ["replicas"] = actual });
         }
 
-        if (storedOn.Count >= Config.WriteQuorum)
-            return new JsonObject { ["ok"] = true, ["stored_on"] = ToJsonArray(storedOn) };
-        return new JsonObject
+        // O INGRESS confirma ao coordenador (cliente fraco não confirma).
+        Protocol.Request(Config.CoordinatorHost, Config.CoordinatorPort,
+            new JsonObject
+            {
+                ["op"] = "CONFIRM_UPLOAD", ["path"] = Protocol.Str(req, "path"),
+                ["chunk_size"] = chunkSize, ["size"] = data.LongLength,
+                ["ingress"] = _nodeId, ["chunks"] = confirmed
+            });
+
+        sw.Stop();
+        EmitMetric("upload", sw.Elapsed.TotalSeconds, data.LongLength);
+        Log($"ingress: {Protocol.Str(req, "path")} ({confirmed.Count} chunk(s), {data.LongLength} B) confirmado");
+        return new JsonObject { ["ok"] = true, ["chunks_written"] = confirmed.Count, ["bytes"] = data.LongLength };
+    }
+
+    // Fan-out de um chunk às suas réplicas. Devolve os node_ids que confirmaram.
+    private List<string> FanOut(string chunkId, byte[] data, JsonArray replicas)
+    {
+        var stored = new List<string>();
+        if (replicas.Cast<JsonObject>().Any(r => Protocol.Str(r, "node_id") == _nodeId) && File.Exists(ChunkPath(chunkId)))
+            stored.Add(_nodeId);
+        var b64 = Protocol.EncodeBytes(data);
+        foreach (var r in replicas.Cast<JsonObject>())
         {
-            ["ok"] = false,
-            ["error"] = $"quórum não atingido ({storedOn.Count}/{Config.WriteQuorum})",
-            ["stored_on"] = ToJsonArray(storedOn)
-        };
+            if (Protocol.Str(r, "node_id") == _nodeId) continue;
+            try
+            {
+                var resp = Protocol.Request(Protocol.Str(r, "host"), Protocol.Int(r, "port"),
+                    new JsonObject { ["op"] = "STORE", ["chunk_id"] = chunkId, ["data"] = b64 });
+                if (Protocol.Bool(resp, "ok")) stored.Add(Protocol.Str(r, "node_id"));
+            }
+            catch (Exception e) { Log($"fan-out falhou p/ {Protocol.Str(r, "node_id")}: {e.Message}"); }
+        }
+        return stored;
+    }
+
+    // ---- Papel de EGRESS (DOWNLOAD_FILE) ------------------------------------
+    // Reúne os chunks (locais + buscados em peers) e devolve o arquivo montado.
+    private JsonObject HandleDownloadFile(JsonObject req)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using var ms = new MemoryStream();
+        foreach (var cn in ((JsonArray)req["chunks"]!).Cast<JsonObject>().OrderBy(c => Protocol.Int(c, "index")))
+        {
+            var chunkId = Protocol.Str(cn, "chunk_id");
+            byte[]? bytes = File.Exists(ChunkPath(chunkId)) ? File.ReadAllBytes(ChunkPath(chunkId)) : FetchFromPeer(cn);
+            if (bytes == null) return new JsonObject { ["ok"] = false, ["error"] = $"chunk {Protocol.Int(cn, "index")} indisponível" };
+            ms.Write(bytes, 0, bytes.Length);
+        }
+        var all = ms.ToArray();
+        sw.Stop();
+        EmitMetric("download", sw.Elapsed.TotalSeconds, all.LongLength);
+        Log($"egress: servindo {((JsonArray)req["chunks"]!).Count} chunk(s), {all.LongLength} B");
+        return new JsonObject { ["ok"] = true, ["data"] = Protocol.EncodeBytes(all), ["bytes"] = all.LongLength };
+    }
+
+    private byte[]? FetchFromPeer(JsonObject chunk)
+    {
+        foreach (var r in ((JsonArray)chunk["replicas"]!).Cast<JsonObject>())
+        {
+            if (Protocol.Str(r, "node_id") == _nodeId) continue;
+            try
+            {
+                var resp = Protocol.Request(Protocol.Str(r, "host"), Protocol.Int(r, "port"),
+                    new JsonObject { ["op"] = "FETCH", ["chunk_id"] = Protocol.Str(chunk, "chunk_id") });
+                if (Protocol.Bool(resp, "ok")) return Protocol.DecodeBytes(Protocol.Str(resp, "data"));
+            }
+            catch { /* tenta a próxima réplica */ }
+        }
+        return null;
+    }
+
+    private void EmitMetric(string metric, double duration, long bytes)
+    {
+        try
+        {
+            Protocol.Request(Config.CoordinatorHost, Config.CoordinatorPort,
+                new JsonObject { ["op"] = "METRIC", ["metric"] = metric, ["duration"] = duration, ["bytes"] = bytes, ["node_id"] = _nodeId });
+        }
+        catch { /* telemetria best-effort */ }
+    }
+
+    // STORE grava um chunk vindo do fan-out de um ingress ou de uma re-replicação.
+    private JsonObject HandleStore(JsonObject req)
+    {
+        WriteChunk(Protocol.Str(req, "chunk_id"), Protocol.DecodeBytes(Protocol.Str(req, "data")));
+        return new JsonObject { ["ok"] = true, ["stored_on"] = new JsonArray(_nodeId) };
     }
 
     private JsonObject HandleFetch(JsonObject req)

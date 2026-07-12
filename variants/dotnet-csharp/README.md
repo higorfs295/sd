@@ -15,37 +15,37 @@ distribuídos, no estilo GFS/HDFS), adaptando apenas a *stack* de transporte.
 | Aspecto | Original (Python) | Esta variante (C#/.NET) |
 |---|---|---|
 | Arquitetura | Coordenador + nós + CLI, controle/dados separados | **Idêntica** |
-| Transporte de controle | gRPC unário | JSON por linha sobre TCP (`Protocol.cs`) |
-| Transporte de dados | gRPC streaming | JSON por linha sobre TCP; bytes em base64 |
+| **Cliente fraco + gateway** | Cliente entrega ao **ingress**; **egress** remonta | **Idêntico** (o cliente não fatia nada) |
+| Transporte | gRPC (unário + streaming) | JSON por linha sobre TCP; bytes em base64 |
 | Mensageria de cura | Apache Kafka | RPC de controle direto (`REPLICATE`) — mesmo papel |
+| **Telemetria** | Consumidor Kafka (`telemetry_hub.py`) | Coordenador agrega métricas; `dfs telemetry` ao vivo |
 | Metadados | JSON em disco | **Idêntico** (`System.Text.Json`) |
-| Placement | Round-robin determinístico persistido | **Idêntico** (`Placement.cs`) |
-| Chunking adaptável | `chunking.py` | **Idêntico** (`ChooseChunkSize`) |
+| Placement / Chunking | determinístico / adaptável | **Idênticos** (`Placement.cs`, `ChooseChunkSize`) |
 | Quórum de escrita | 2 de 3 | **Idêntico** |
-| Heartbeat 3 estados | ALIVE/SUSPECT/DEAD preguiçoso | **Idêntico** |
-| Re-replicação, GC, elasticidade | Sim | **Sim** |
+| Heartbeat 3 estados / Re-replicação / GC / Elasticidade | Sim | **Sim** |
+| Benchmark / testes | `benchmark_harness.py`, testes | `dfs benchmark`, `dfs test-unit`, `dfs test-integrity` |
 
-A essência — **separação plano de controle / plano de dados, chunking,
-placement determinístico, replicação com quórum, detecção de falhas por
-heartbeat, re-replicação automática e consistência eventual** — é integralmente
-preservada. A comunicação usa apenas a *Base Class Library* do .NET (sem gRPC,
-sem Kafka, sem pacotes NuGet externos).
+Usa apenas a *Base Class Library* do .NET — sem gRPC, sem Kafka, sem NuGet externo.
 
 ---
 
-## 2. Arquitetura
+## 2. Arquitetura e o modelo ingress/egress
+
+O cliente é **fraco**: não fatia arquivos, não decide posicionamento. Faz duas
+conversas por operação — controle com o coordenador e dados com um **gateway**:
 
 ```
-            plano de CONTROLE (metadados leves)
-   CLI  <───────────────────────────────────►  COORDENADOR (Coordinator.cs)
-    │        REQUEST_UPLOAD / CONFIRM /            - registro de nós + vivacidade
-    │        REQUEST_DOWNLOAD / LIST / DELETE      - placement determinístico
-    │        + REGISTER / HEARTBEAT (dos nós)      - metadados (JSON)
-    │                                             - supervisor de re-replicação
-    │  plano de DADOS (bytes dos arquivos)         - garbage collection
-    └──────────────►  NÓS DE ARMAZENAMENTO  ◄─────► NÓS (fan-out entre si)
-         STORE / FETCH / DELETE / LIST / REPLICATE   (StorageNode.cs)
+   PUT:  CLI --RequestUpload--> COORDENADOR  (devolve plano + INGRESS vivo)
+         CLI --arquivo inteiro--> INGRESS --fatia+replica c/ quórum--> réplicas
+                                  INGRESS --ConfirmUpload--> COORDENADOR
+
+   GET:  CLI --RequestDownload--> COORDENADOR (devolve mapa + EGRESS por localidade)
+         CLI --pede arquivo--> EGRESS --lê local + FETCH em peers--> CLI
 ```
+
+- **Ingress**: escolhido entre os nós **vivos** (round-robin por arquivo). Recebe
+  o arquivo, fatia, grava/replica com **quórum 2/3** e **confirma** ao coordenador.
+- **Egress**: o nó **vivo com mais chunks** do arquivo (localidade). Remonta e devolve.
 
 ---
 
@@ -56,20 +56,23 @@ sem Kafka, sem pacotes NuGet externos).
 | `Config.cs` | Parâmetros centrais | `dfs/config.py` |
 | `Protocol.cs` | Transporte TCP + JSON por linha | (camada gRPC) |
 | `Placement.cs` | Round-robin determinístico | `cluster/placement.py` |
-| `Coordinator.cs` | Plano de controle | `server.py` + `node_registry.py` + `metadata_service.py` + `replication_watcher.py` |
-| `StorageNode.cs` | Plano de dados | `storage_node.py` + `data_service.py` + `local_storage.py` |
-| `Client.cs` | CLI put/get/list/rm/status | `cli.py` + `client.py` |
+| `Coordinator.cs` | Controle + ingress/egress + telemetria | `server.py` + `node_registry.py` + `metadata_service.py` + `replication_watcher.py` |
+| `StorageNode.cs` | Dados (ingress/egress, fan-out, réplica) | `storage_node.py` + `data_service.py` + `local_storage.py` |
+| `Client.cs` | CLI put/get/list/rm/status/metrics | `cli.py` + `client.py` |
 | `ClusterRunner.cs` | Orquestrador do cluster | `run_cluster.py` |
+| `Telemetry.cs` | Hub de telemetria ao vivo | `telemetry_hub.py` |
+| `Benchmark.cs` | Benchmark de latência/throughput (CSV) | `benchmark_harness.py` + `plot_metrics.py` |
+| `Tests.cs` | Testes de placement/chunking e integridade | `test_chunking.py` + `test_node_failure.py` |
 | `Program.cs` | Dispatcher por subcomando | `__main__.py` |
 
-Um único executável (`dfs`) assume papéis diferentes conforme o subcomando.
+Um único executável (`dfs`) assume todos os papéis conforme o subcomando.
 
 ---
 
 ## 4. Pré-requisitos
 
-Apenas o **.NET SDK 9.0+** (testado com 9.0.203). Nenhum pacote NuGet externo,
-nenhum Docker, Kafka ou gRPC.
+Apenas o **.NET SDK 9.0+** (testado com 9.0.203). Sem NuGet externo, Docker,
+Kafka ou gRPC.
 
 ---
 
@@ -82,62 +85,51 @@ cd variants/dotnet-csharp
 dotnet run -- cluster
 ```
 
-Sobe o coordenador (porta 9100) e os cinco nós (portas 9101–9105) como processos
-independentes. Deixe a janela aberta; `Ctrl+C` encerra tudo.
-
-### 5.2. Usar a CLI (em outro terminal)
+### 5.2. CLI (em outro terminal)
 
 ```
-dotnet run -- client put <arquivo_local> <caminho_dfs>
-dotnet run -- client get <caminho_dfs> <arquivo_local>
+dotnet run -- client put <arquivo_local> <caminho_dfs>   # entrega ao ingress
+dotnet run -- client get <caminho_dfs> <arquivo_local>   # recebe do egress
 dotnet run -- client list
 dotnet run -- client rm  <caminho_dfs>
 dotnet run -- client status
+dotnet run -- client metrics
 ```
 
-> Dica: `dotnet run` recompila a cada chamada. Para agilizar, compile uma vez com
-> `dotnet build` e chame o binário direto:
-> `./bin/Debug/net9.0/dfs client status`.
+> `dotnet run` recompila a cada chamada. Para agilizar, compile uma vez com
+> `dotnet build` e use o binário: `./bin/Debug/net9.0/dfs client status`.
 
-Exemplo completo:
+### 5.3. Telemetria, benchmark e testes
 
 ```
-dotnet run -- client put ./foto.jpg /album/foto.jpg
-dotnet run -- client list
-dotnet run -- client get /album/foto.jpg ./foto_baixada.jpg
+dotnet run -- telemetry                       # métricas ao vivo
+dotnet run -- benchmark --sizes 1 2 5 --iter 3 # CSV em benchmark/resultados.csv
+dotnet run -- test-unit                        # placement + chunking (sem cluster)
+dotnet run -- test-integrity 4                 # PUT/GET + SHA-256 (com cluster)
 ```
 
 ---
 
 ## 6. Como validar os requisitos
 
-**Correção (integridade byte a byte).** Envie e baixe um arquivo, e compare os
-bytes — devem ser idênticos.
-
-**Tolerância a falhas + re-replicação.** Com o cluster no ar e um arquivo
-enviado, mate um dos processos de nó (portas 9101–9105). Em ~10–14 s o
-coordenador marca o nó como `DEAD` (`client status`), a re-replicação restaura o
-fator 3 em nós vivos, e o `get` continua devolvendo o arquivo íntegro.
-
-**Escalabilidade / elasticidade.** Suba um nó extra em runtime — ele se registra
-e passa a receber placement nos uploads seguintes:
-
-```
-dotnet run -- node node6 9106 ./data/nodes/node6
-```
+- **Correção**: `test-integrity` compara o SHA-256 do arquivo enviado e baixado.
+- **Tolerância a falhas + re-replicação**: com um arquivo enviado, mate um nó
+  (portas 9101–9105); em ~10–14 s ele fica `DEAD` (`client status`), a
+  re-replicação restaura o fator 3, o `get` segue íntegro (servido por um egress
+  vivo) e o contador de re-replicações sobe.
+- **Escalabilidade / elasticidade**: `dotnet run -- node node6 9106 ./data/nodes/node6`.
+- **Análise experimental**: `benchmark` gera latência/throughput por tamanho.
 
 ---
 
 ## 7. Decisões de projeto preservadas
 
-- **Separação controle/dados**: o coordenador só troca metadados; os bytes fluem
-  direto entre CLI e nós.
-- **Placement determinístico e persistido**: chunk `i` → nós `i, i+1, i+2 (mod N)`,
-  decidido uma vez e gravado nos metadados; nunca recalculado.
-- **Quórum de escrita (2/3)**: durabilidade garantida no `confirm`.
-- **Consistência eventual**: re-replicação restaura réplicas perdidas; a coleta de
-  órfãos (block report no heartbeat) remove cópias redundantes em poucos ciclos.
-- **Coordenador único**: modelo GFS/HDFS v1; recuperação relendo o índice persistido.
+- **Separação controle/dados** e **cliente fraco**: o coordenador só troca
+  metadados; o ingress orquestra a escrita, o egress a leitura.
+- **Placement determinístico e persistido**: chunk `i` → nós `i, i+1, i+2 (mod N)`.
+- **Quórum de escrita (2/3)** no fan-out do ingress.
+- **Consistência eventual**: re-replicação + coleta de órfãos (2 ciclos).
+- **Coordenador único**: modelo GFS/HDFS v1; recuperação relendo o índice.
 
 Para o detalhamento conceitual completo, consulte o `README.md` e o
 `ARQUITETURA.md` do projeto original em Python.

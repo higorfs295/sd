@@ -22,15 +22,21 @@ public class Coordinator
     private class NodeState { public string Host = ""; public int Port; public double LastHb; public List<string> Chunks = new(); }
     public class Replica { public string node_id { get; set; } = ""; public string host { get; set; } = ""; public int port { get; set; } }
     public class ChunkEntry { public int index { get; set; } public string chunk_id { get; set; } = ""; public List<Replica> replicas { get; set; } = new(); }
-    public class FileEntry { public int num_chunks { get; set; } public long chunk_size { get; set; } public double created_at { get; set; } public List<ChunkEntry> chunks { get; set; } = new(); }
+    public class FileEntry { public int num_chunks { get; set; } public long chunk_size { get; set; } public long size { get; set; } public double created_at { get; set; } public List<ChunkEntry> chunks { get; set; } = new(); }
     public class MetadataDoc { public Dictionary<string, FileEntry> files { get; set; } = new(); }
+
+    // Agregado de telemetria por operação (upload/download).
+    private class MetricAgg { public int Count; public double Total; public double? Min; public double? Max; public long Bytes; }
 
     private readonly object _lock = new();
     private readonly Dictionary<string, NodeState> _nodes = new();
     private readonly Dictionary<string, Dictionary<string, int>> _suspectedOrphans = new();
     private readonly Dictionary<string, List<string>> _pendingDeletes = new();
     private readonly Dictionary<string, string> _prevState = new();
-    private int _fileCounter;
+    private readonly Dictionary<string, MetricAgg> _metrics = new();
+    private int _uploadCounter;
+    private int _rereplications;
+    private int _gcDeletes;
 
     private List<string> _membership;
     private readonly Dictionary<string, Config.NodeInfo> _nodeConfig = new();
@@ -67,6 +73,8 @@ public class Coordinator
             "DELETE_FILE" => HandleDeleteFile(req),
             "LIST_FILES" => HandleListFiles(),
             "UPDATE_REPLICAS" => HandleUpdateReplicas(req),
+            "METRIC" => HandleMetric(req),
+            "METRICS" => HandleMetrics(),
             "STATUS" => HandleStatus(),
             _ => new JsonObject { ["ok"] = false, ["error"] = $"op desconhecida: {Protocol.Str(req, "op")}" }
         };
@@ -117,6 +125,7 @@ public class Coordinator
                 suspects[cid] = suspects.GetValueOrDefault(cid) + 1;
                 if (suspects[cid] >= 2) toDelete.Add(cid);
             }
+            _gcDeletes += toDelete.Count;
         }
         return new JsonObject { ["ok"] = true, ["delete"] = ToJsonArray(toDelete.Distinct()) };
     }
@@ -128,8 +137,6 @@ public class Coordinator
         long chunkSize = ChooseChunkSize(size, _membership.Count);
         int numChunks = size <= 0 ? 1 : (int)Math.Ceiling((double)size / chunkSize);
         if (numChunks == 0) numChunks = 1;
-
-        lock (_lock) { _fileCounter++; }
 
         var chunksArr = new JsonArray();
         for (int i = 0; i < numChunks; i++)
@@ -150,11 +157,18 @@ public class Coordinator
             });
         }
 
-        Log($"upload {uploadId} p/ {Protocol.Str(req, "path")}: {numChunks} chunk(s) de {chunkSize} B");
+        // Ingress: round-robin ENTRE os nós vivos (o placement usa a canônica).
+        var liveMembers = _membership.Where(m => StateOf(m) != Dead).ToList();
+        if (liveMembers.Count == 0) return new JsonObject { ["ok"] = false, ["error"] = "nenhum nó vivo para ingress" };
+        int idx;
+        lock (_lock) { idx = _uploadCounter++; }
+        var ingressId = Placement.SortNodes(liveMembers)[idx % liveMembers.Count];
+
+        Log($"upload {uploadId} p/ {Protocol.Str(req, "path")}: {numChunks} chunk(s) de {chunkSize} B, ingress={ingressId}");
         return new JsonObject
         {
             ["ok"] = true, ["upload_id"] = uploadId, ["chunk_size"] = chunkSize,
-            ["num_chunks"] = numChunks, ["chunks"] = chunksArr
+            ["num_chunks"] = numChunks, ["ingress"] = AddrJson(ingressId), ["chunks"] = chunksArr
         };
     }
 
@@ -164,6 +178,7 @@ public class Coordinator
         var entry = new FileEntry
         {
             chunk_size = Protocol.Long(req, "chunk_size"),
+            size = Protocol.Long(req, "size"),
             created_at = Now(),
             chunks = new List<ChunkEntry>()
         };
@@ -180,7 +195,7 @@ public class Coordinator
         }
         entry.num_chunks = entry.chunks.Count;
         lock (_lock) { _metadata.files[path] = entry; PersistMetadata(); }
-        Log($"arquivo {path} confirmado nos metadados");
+        Log($"arquivo {path} confirmado nos metadados (ingress={Protocol.Str(req, "ingress")})");
         return new JsonObject { ["ok"] = true };
     }
 
@@ -194,13 +209,21 @@ public class Coordinator
         var chunksArr = new JsonArray();
         foreach (var c in entry.chunks)
         {
-            var live = c.replicas.Where(r => StateOf(r.node_id) != Dead).ToList();
-            var chosen = live.Count > 0 ? live : c.replicas;
             var replicasJson = new JsonArray();
-            foreach (var r in chosen) replicasJson.Add(ReplicaJson(r));
+            foreach (var r in c.replicas) replicasJson.Add(ReplicaJson(r));
             chunksArr.Add(new JsonObject { ["index"] = c.index, ["chunk_id"] = c.chunk_id, ["replicas"] = replicasJson });
         }
-        return new JsonObject { ["ok"] = true, ["num_chunks"] = entry.num_chunks, ["chunks"] = chunksArr };
+
+        // Egress por LOCALIDADE: o nó vivo com mais chunks do arquivo.
+        var counts = new Dictionary<string, int>();
+        foreach (var c in entry.chunks)
+            foreach (var r in c.replicas)
+                if (StateOf(r.node_id) != Dead) counts[r.node_id] = counts.GetValueOrDefault(r.node_id) + 1;
+        if (counts.Count == 0) return new JsonObject { ["ok"] = false, ["error"] = "nenhuma réplica viva para servir o download" };
+        var egressId = counts.OrderByDescending(kv => kv.Value).First().Key;
+
+        Log($"download {path}: egress={egressId} ({counts[egressId]} de {entry.num_chunks} chunks locais)");
+        return new JsonObject { ["ok"] = true, ["num_chunks"] = entry.num_chunks, ["egress"] = AddrJson(egressId), ["chunks"] = chunksArr };
     }
 
     private JsonObject HandleDeleteFile(JsonObject req)
@@ -236,7 +259,7 @@ public class Coordinator
             foreach (var (path, e) in _metadata.files)
             {
                 var nodes = e.chunks.SelectMany(c => c.replicas.Select(r => r.node_id)).Distinct().OrderBy(x => x).ToList();
-                arr.Add(new JsonObject { ["path"] = path, ["num_chunks"] = e.num_chunks, ["nodes"] = ToJsonArray(nodes) });
+                arr.Add(new JsonObject { ["path"] = path, ["num_chunks"] = e.num_chunks, ["size"] = e.size, ["nodes"] = ToJsonArray(nodes) });
             }
         }
         return new JsonObject { ["ok"] = true, ["files"] = arr };
@@ -268,7 +291,47 @@ public class Coordinator
     {
         var arr = new JsonArray();
         foreach (var nid in _membership) arr.Add(new JsonObject { ["node_id"] = nid, ["state"] = StateOf(nid) });
-        return new JsonObject { ["ok"] = true, ["nodes"] = arr, ["files"] = _metadata.files.Count };
+        return new JsonObject { ["ok"] = true, ["nodes"] = arr, ["files"] = _metadata.files.Count,
+            ["rereplications"] = _rereplications, ["gc_deletes"] = _gcDeletes };
+    }
+
+    // METRIC: um nó ingress/egress reporta a duração e o volume de uma operação.
+    private JsonObject HandleMetric(JsonObject req)
+    {
+        var op = Protocol.Str(req, "metric");
+        double dur = req["duration"]?.GetValue<double>() ?? 0;
+        lock (_lock)
+        {
+            if (!_metrics.TryGetValue(op, out var m)) { m = new MetricAgg(); _metrics[op] = m; }
+            m.Count++;
+            m.Total += dur;
+            m.Bytes += Protocol.Long(req, "bytes");
+            if (m.Min == null || dur < m.Min) m.Min = dur;
+            if (m.Max == null || dur > m.Max) m.Max = dur;
+        }
+        return new JsonObject { ["ok"] = true };
+    }
+
+    private JsonObject HandleMetrics()
+    {
+        var ops = new JsonObject();
+        lock (_lock)
+        {
+            foreach (var (op, m) in _metrics)
+            {
+                double avg = m.Count == 0 ? 0 : m.Total / m.Count;
+                ops[op] = new JsonObject
+                {
+                    ["count"] = m.Count,
+                    ["avg_ms"] = Math.Round(avg * 1000, 2),
+                    ["min_ms"] = Math.Round((m.Min ?? 0) * 1000, 2),
+                    ["max_ms"] = Math.Round((m.Max ?? 0) * 1000, 2),
+                    ["bytes"] = m.Bytes
+                };
+            }
+            return new JsonObject { ["ok"] = true, ["ops"] = ops, ["rereplications"] = _rereplications,
+                ["gc_deletes"] = _gcDeletes, ["files"] = _metadata.files.Count };
+        }
     }
 
     // ---- Vivacidade (máquina de 3 estados, cálculo preguiçoso) --------------
@@ -384,6 +447,7 @@ public class Coordinator
                 chunk.replicas = chunk.replicas.Where(r => StateOf(r.node_id) != Dead).ToList();
                 chunk.replicas.Add(new Replica { node_id = target, host = Protocol.Str(tgt, "host"), port = Protocol.Int(tgt, "port") });
                 chunk.replicas = chunk.replicas.GroupBy(r => r.node_id).Select(g => g.First()).ToList();
+                _rereplications++;
                 PersistMetadata();
             }
             Log($"chunk {chunk.chunk_id} re-replicado {source} -> {target}");

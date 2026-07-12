@@ -1,12 +1,12 @@
 // =============================================================================
 // Client.cs — Interface de linha de comando (CLI) da variante .NET/C#.
 //
-// Espelha cli.py + client.py. Cliente "fraco": fala controle com o coordenador
-// e dados com os nós. Comandos: put, get, list, rm, status.
+// Espelha cli.py + client.py. CLIENTE FRACO: não fatia arquivos nem decide
+// posicionamento. Fala controle com o coordenador (para achar ingress/egress) e
+// entrega/recebe o arquivo INTEIRO a/do nó gateway.
 //
-// PUT: RequestUpload -> envia cada chunk ao nó primary (gateway) que faz o
-//      fan-out com quórum -> ConfirmUpload.
-// GET (estilo GFS): pede o mapa de chunks e busca cada pedaço numa réplica viva.
+// PUT: RequestUpload -> envia o arquivo ao INGRESS (que fatia, replica e confirma).
+// GET: RequestDownload -> pede o arquivo ao EGRESS (que remonta por localidade).
 // =============================================================================
 
 using System.Text.Json.Nodes;
@@ -26,40 +26,19 @@ public class Client
         var plan = Coord(new JsonObject { ["op"] = "REQUEST_UPLOAD", ["path"] = dfsPath, ["size"] = data.LongLength });
         if (!Protocol.Bool(plan, "ok")) { Console.Error.WriteLine($"coordenador recusou: {Protocol.Str(plan, "error")}"); Environment.Exit(1); }
 
-        long chunkSize = Protocol.Long(plan, "chunk_size");
-        var confirmed = new JsonArray();
-        foreach (var c in (JsonArray)plan["chunks"]!)
-        {
-            var co = (JsonObject)c!;
-            int i = Protocol.Int(co, "index");
-            long offset = (long)i * chunkSize;
-            int len = (int)Math.Min(chunkSize, data.LongLength - offset);
-            var slice = new byte[Math.Max(0, len)];
-            if (len > 0) Array.Copy(data, offset, slice, 0, len);
+        var ingress = (JsonObject)plan["ingress"]!;
+        // Entrega o arquivo INTEIRO ao ingress; ele fatia, replica e confirma.
+        var resp = Protocol.Request(Protocol.Str(ingress, "host"), Protocol.Int(ingress, "port"),
+            new JsonObject
+            {
+                ["op"] = "UPLOAD_FILE", ["path"] = dfsPath,
+                ["upload_id"] = Protocol.Str(plan, "upload_id"), ["chunk_size"] = Protocol.Long(plan, "chunk_size"),
+                ["chunks"] = plan["chunks"]!.DeepClone(), ["data"] = Protocol.EncodeBytes(data)
+            });
+        if (!Protocol.Bool(resp, "ok")) { Console.Error.WriteLine($"falha no upload (ingress {Protocol.Str(ingress, "node_id")}): {Protocol.Str(resp, "error")}"); Environment.Exit(1); }
 
-            var replicas = (JsonArray)co["replicas"]!;
-            var primary = (JsonObject)replicas[0]!;
-
-            var resp = Protocol.Request(Protocol.Str(primary, "host"), Protocol.Int(primary, "port"),
-                new JsonObject
-                {
-                    ["op"] = "STORE", ["chunk_id"] = Protocol.Str(co, "chunk_id"),
-                    ["data"] = Protocol.EncodeBytes(slice), ["primary"] = true,
-                    ["fanout"] = replicas.DeepClone()
-                });
-            if (!Protocol.Bool(resp, "ok")) { Console.Error.WriteLine($"falha ao gravar chunk {i}: {Protocol.Str(resp, "error")}"); Environment.Exit(1); }
-
-            var storedOn = ((JsonArray)resp["stored_on"]!).Select(x => x!.GetValue<string>()).ToHashSet();
-            var actual = new JsonArray();
-            foreach (var r in replicas)
-                if (storedOn.Contains(Protocol.Str((JsonObject)r!, "node_id"))) actual.Add(r!.DeepClone());
-
-            confirmed.Add(new JsonObject { ["index"] = i, ["chunk_id"] = Protocol.Str(co, "chunk_id"), ["replicas"] = actual });
-            Console.WriteLine($"  chunk {i}: gravado em {string.Join(", ", storedOn)}");
-        }
-
-        Coord(new JsonObject { ["op"] = "CONFIRM_UPLOAD", ["path"] = dfsPath, ["chunk_size"] = chunkSize, ["chunks"] = confirmed });
-        Console.WriteLine($"OK: {localPath} -> {dfsPath} ({confirmed.Count} chunk(s))");
+        Console.WriteLine($"OK: {localPath} -> {dfsPath} via ingress {Protocol.Str(ingress, "node_id")} " +
+                          $"({Protocol.Int(resp, "chunks_written")} chunk(s), {Protocol.Long(resp, "bytes")} B)");
     }
 
     public void Get(string dfsPath, string localPath)
@@ -67,31 +46,13 @@ public class Client
         var plan = Coord(new JsonObject { ["op"] = "REQUEST_DOWNLOAD", ["path"] = dfsPath });
         if (!Protocol.Bool(plan, "ok")) { Console.Error.WriteLine($"coordenador: {Protocol.Str(plan, "error")}"); Environment.Exit(1); }
 
-        using var outFile = File.Create(localPath);
-        var chunks = ((JsonArray)plan["chunks"]!).Cast<JsonObject>().OrderBy(c => Protocol.Int(c, "index"));
-        foreach (var c in chunks)
-        {
-            var bytes = FetchChunk(c);
-            if (bytes == null) { Console.Error.WriteLine($"não consegui obter o chunk {Protocol.Int(c, "index")} de nenhuma réplica viva"); Environment.Exit(1); }
-            outFile.Write(bytes, 0, bytes.Length);
-        }
-        Console.WriteLine($"OK: {dfsPath} -> {localPath}");
-    }
+        var egress = (JsonObject)plan["egress"]!;
+        var resp = Protocol.Request(Protocol.Str(egress, "host"), Protocol.Int(egress, "port"),
+            new JsonObject { ["op"] = "DOWNLOAD_FILE", ["path"] = dfsPath, ["chunks"] = plan["chunks"]!.DeepClone() });
+        if (!Protocol.Bool(resp, "ok")) { Console.Error.WriteLine($"falha no download (egress {Protocol.Str(egress, "node_id")}): {Protocol.Str(resp, "error")}"); Environment.Exit(1); }
 
-    private static byte[]? FetchChunk(JsonObject chunk)
-    {
-        foreach (var r in (JsonArray)chunk["replicas"]!)
-        {
-            var ro = (JsonObject)r!;
-            try
-            {
-                var resp = Protocol.Request(Protocol.Str(ro, "host"), Protocol.Int(ro, "port"),
-                    new JsonObject { ["op"] = "FETCH", ["chunk_id"] = Protocol.Str(chunk, "chunk_id") });
-                if (Protocol.Bool(resp, "ok")) return Protocol.DecodeBytes(Protocol.Str(resp, "data"));
-            }
-            catch { /* tenta a próxima réplica */ }
-        }
-        return null;
+        File.WriteAllBytes(localPath, Protocol.DecodeBytes(Protocol.Str(resp, "data")));
+        Console.WriteLine($"OK: {dfsPath} -> {localPath} via egress {Protocol.Str(egress, "node_id")} ({Protocol.Long(resp, "bytes")} B)");
     }
 
     public void List()
@@ -99,11 +60,11 @@ public class Client
         var resp = Coord(new JsonObject { ["op"] = "LIST_FILES" });
         var files = (JsonArray)resp["files"]!;
         if (files.Count == 0) { Console.WriteLine("(nenhum arquivo)"); return; }
-        Console.WriteLine($"{"CAMINHO",-30} {"CHUNKS",6}  NÓS");
+        Console.WriteLine($"{"CAMINHO",-28} {"CHUNKS",6} {"BYTES",10}  NÓS");
         foreach (var f in files.Cast<JsonObject>())
         {
             var nodes = string.Join(",", ((JsonArray)f["nodes"]!).Select(x => x!.GetValue<string>()));
-            Console.WriteLine($"{Protocol.Str(f, "path"),-30} {Protocol.Int(f, "num_chunks"),6}  {nodes}");
+            Console.WriteLine($"{Protocol.Str(f, "path"),-28} {Protocol.Int(f, "num_chunks"),6} {Protocol.Long(f, "size"),10}  {nodes}");
         }
     }
 
@@ -117,8 +78,22 @@ public class Client
     public void Status()
     {
         var resp = Coord(new JsonObject { ["op"] = "STATUS" });
-        Console.WriteLine($"arquivos: {Protocol.Int(resp, "files")}");
+        Console.WriteLine($"arquivos: {Protocol.Int(resp, "files")} | re-replicações: {Protocol.Int(resp, "rereplications")} | GC: {Protocol.Int(resp, "gc_deletes")}");
         foreach (var n in ((JsonArray)resp["nodes"]!).Cast<JsonObject>())
             Console.WriteLine($"  {Protocol.Str(n, "node_id"),-8} {Protocol.Str(n, "state")}");
+    }
+
+    public void Metrics()
+    {
+        var resp = Coord(new JsonObject { ["op"] = "METRICS" });
+        Console.WriteLine($"arquivos: {Protocol.Int(resp, "files")} | re-replicações: {Protocol.Int(resp, "rereplications")} | GC apagou: {Protocol.Int(resp, "gc_deletes")}");
+        var ops = (JsonObject)resp["ops"]!;
+        if (ops.Count == 0) { Console.WriteLine("(sem métricas de operação ainda)"); return; }
+        Console.WriteLine($"{"OP",-10} {"N",6} {"AVG(ms)",10} {"MIN(ms)",10} {"MAX(ms)",10} {"BYTES",12}");
+        foreach (var (op, mv) in ops)
+        {
+            var m = (JsonObject)mv!;
+            Console.WriteLine($"{op,-10} {Protocol.Int(m, "count"),6} {m["avg_ms"]!.GetValue<double>(),10:F2} {m["min_ms"]!.GetValue<double>(),10:F2} {m["max_ms"]!.GetValue<double>(),10:F2} {Protocol.Long(m, "bytes"),12}");
+        }
     }
 }
